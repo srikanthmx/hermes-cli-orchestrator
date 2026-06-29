@@ -515,6 +515,9 @@ async def health():
 
 MEDIA_CATALOG: List[Dict[str, Any]] = [
     # ── Voice / TTS ──────────────────────────────────────────────────────────
+    {"id": "edge", "name": "Edge TTS (free)", "category": "Voice / TTS", "kind": "native",
+     "mechanism": "Hermes default TTS — free, no key (verified)", "env": [], "keyless": True,
+     "signup": "", "docs": "https://github.com/rany2/edge-tts"},
     {"id": "elevenlabs", "name": "ElevenLabs", "category": "Voice / TTS", "kind": "native",
      "mechanism": "TTS provider", "env": ["ELEVENLABS_API_KEY"],
      "signup": "https://elevenlabs.io/app/settings/api-keys", "docs": "https://elevenlabs.io"},
@@ -541,6 +544,9 @@ MEDIA_CATALOG: List[Dict[str, Any]] = [
      "mechanism": "local STT command", "env": [], "bin": "whisper",
      "signup": "", "docs": "https://github.com/ggerganov/whisper.cpp"},
     # ── Image generation ─────────────────────────────────────────────────────
+    {"id": "pollinations", "name": "Pollinations (free)", "category": "Image", "kind": "plugin",
+     "mechanism": "image_gen plugin — free, no key (verified, bundled with this tool)",
+     "env": [], "keyless": True, "signup": "", "docs": "https://pollinations.ai"},
     {"id": "fal", "name": "fal.ai", "category": "Image", "kind": "native",
      "mechanism": "image_gen plugin", "env": ["FAL_KEY"],
      "signup": "https://fal.ai/dashboard/keys", "docs": "https://fal.ai"},
@@ -609,7 +615,9 @@ async def media_scan():
     rows: List[Dict[str, Any]] = []
     for m in MEDIA_CATALOG:
         envs = m.get("env", [])
-        if envs:
+        if m.get("keyless"):
+            configured = True  # free, no key required — works out of the box
+        elif envs:
             configured = all(_key_present(e, env_file) for e in envs)
         else:  # local command backend
             configured = shutil.which(m.get("bin", "")) is not None if m.get("bin") else False

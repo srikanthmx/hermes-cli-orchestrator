@@ -1,0 +1,5 @@
+name: pollinations
+version: 1.0.0
+description: "Pollinations.ai image generation backend — free, no API key (text-to-image)."
+author: hermes-cli-orchestrator
+kind: backend
