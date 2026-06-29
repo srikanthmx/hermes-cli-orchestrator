@@ -139,7 +139,8 @@
         h("div", { className: "flex items-start justify-between gap-2" },
           h("div", { className: "flex flex-col gap-1" },
             h(C.CardTitle, { className: "text-base font-courier" }, c.name),
-            h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, c.category)
+            h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, c.category),
+            c.plan ? h("span", { className: "text-[11px] text-emerald-400/80" }, c.plan) : null
           ),
           StatusBadge(c.status, c.auth)
         )
@@ -277,6 +278,111 @@
     );
   }
 
+  // ── media & integrations ─────────────────────────────────────────────────
+  function KindBadge(kind) {
+    var m = kind === "native"
+      ? ["Native", "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"]
+      : ["Plugin", "text-sky-400 border-sky-500/40 bg-sky-500/10"];
+    return h("span", {
+      className: cn("inline-flex items-center border px-2 py-0.5 text-[10px] font-courier uppercase tracking-wider", m[1]),
+    }, m[0]);
+  }
+
+  function MediaCard(props) {
+    var mi = props.media;
+    var keySt = useState(""); var key = keySt[0], setKey = keySt[1];
+    var savingSt = useState(false); var saving = savingSt[0], setSaving = savingSt[1];
+    var savedSt = useState(false); var saved = savedSt[0], setSaved = savedSt[1];
+
+    function save() {
+      if (!key.trim() || !mi.env || !mi.env.length) return;
+      setSaving(true); setSaved(false);
+      postJSON("/media/key", { env: mi.env[0], value: key.trim() })
+        .then(function () { setSaved(true); setKey(""); if (props.onChanged) props.onChanged(); })
+        .catch(function () {})
+        .finally(function () { setSaving(false); });
+    }
+
+    return h(C.Card, { className: "flex flex-col" },
+      h(C.CardHeader, { className: "pb-2" },
+        h("div", { className: "flex items-start justify-between gap-2" },
+          h("div", { className: "flex flex-col gap-1" },
+            h(C.CardTitle, { className: "text-sm font-courier" }, mi.name),
+            h("span", { className: "text-[11px] text-muted-foreground" }, mi.mechanism)
+          ),
+          h("div", { className: "flex flex-col items-end gap-1" },
+            KindBadge(mi.kind),
+            mi.configured
+              ? h("span", { className: "text-[10px] text-emerald-400" }, "● configured")
+              : h("span", { className: "text-[10px] text-muted-foreground" }, mi.needs_key ? "○ no key" : "○ not installed")
+          )
+        )
+      ),
+      h(C.CardContent, { className: "flex flex-col gap-2" },
+        mi.needs_key
+          ? h("div", { className: "flex items-center gap-2" },
+              h("input", {
+                type: "password", value: key, placeholder: mi.env[0],
+                onChange: function (e) { setKey(e.target.value); setSaved(false); },
+                className: "flex-1 border border-border bg-background/40 px-2 py-1 font-courier text-xs outline-none focus:border-emerald-500/60",
+              }),
+              h("button", {
+                onClick: save, disabled: saving || !key.trim(),
+                className: "border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 cursor-pointer",
+              }, saving ? "…" : saved ? "saved ✓" : mi.configured ? "Replace" : "Save")
+            )
+          : h("span", { className: "text-[11px] text-muted-foreground" }, "Local backend — no API key needed."),
+        mi.signup ? h("a", {
+          href: mi.signup, target: "_blank", rel: "noreferrer",
+          className: "text-[11px] text-muted-foreground underline hover:text-foreground",
+        }, mi.needs_key ? "get a key ↗" : "docs ↗") : null
+      )
+    );
+  }
+
+  function MediaPanel() {
+    var mediaSt = useState([]); var media = mediaSt[0], setMedia = mediaSt[1];
+    var loadingSt = useState(true); var loading = loadingSt[0], setLoading = loadingSt[1];
+
+    var load = useCallback(function () {
+      setLoading(true);
+      return getJSON("/media/scan")
+        .then(function (d) { setMedia((d && d.media) || []); })
+        .catch(function () {})
+        .finally(function () { setLoading(false); });
+    }, []);
+    useEffect(function () { load(); }, [load]);
+
+    var byCat = {};
+    media.forEach(function (m) { (byCat[m.category] = byCat[m.category] || []).push(m); });
+    var cats = Object.keys(byCat);
+    var configured = media.filter(function (m) { return m.configured; }).length;
+
+    return h("div", { className: "flex flex-col gap-4 border-t border-border pt-6" },
+      h("div", { className: "flex items-center justify-between" },
+        h("div", { className: "flex items-center gap-3" },
+          h("h3", { className: "font-courier text-sm uppercase tracking-wider text-muted-foreground" }, "Media & Integrations"),
+          media.length ? h(C.Badge, { variant: "outline" }, configured + "/" + media.length + " configured") : null,
+          h("span", { className: "text-[11px] text-muted-foreground" }, "native = Hermes built-in · plugin = needs a backend")
+        ),
+        h("button", {
+          onClick: load,
+          className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer",
+        }, "⟳ Re-scan")
+      ),
+      cats.map(function (cat) {
+        return h("div", { key: cat, className: "flex flex-col gap-2" },
+          h("h4", { className: "font-courier text-xs uppercase tracking-wider text-muted-foreground/70" }, cat),
+          h("div", { className: "grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3" },
+            byCat[cat].map(function (mi) {
+              return h(MediaCard, { key: mi.id, media: mi, onChanged: load });
+            })
+          )
+        );
+      })
+    );
+  }
+
   // ── top-level page ───────────────────────────────────────────────────────
   function CliMatrixPage() {
     var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
@@ -348,7 +454,10 @@
       }),
 
       // ── routing ──
-      h(RoutingManager, { rules: routing, clis: clis })
+      h(RoutingManager, { rules: routing, clis: clis }),
+
+      // ── media & integrations ──
+      h(MediaPanel, null)
     );
   }
 

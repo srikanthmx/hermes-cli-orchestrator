@@ -5,7 +5,11 @@ into the *agent runtime*:
 
   * a ``post_tool_call`` hook that records every time the agent drives a tracked
     CLI through the ``terminal`` tool (this is what populates the usage gauges
-    you see in the CLI Matrix tab — real counts, not simulated), and
+    you see in the CLI Matrix tab — real counts, not simulated),
+  * a ``pre_llm_call`` hook that injects a routing policy each turn so a cheap
+    local orchestrator model DELEGATES high-intensity work (code gen, image gen,
+    heavy multi-file tasks) to the capable CLIs you've mapped in the
+    orchestration matrix — instead of attempting it on the weak local model, and
   * a ``/cli`` slash command for a quick status read inside any session.
 
 State is shared with the dashboard backend via the same JSON file under
@@ -21,6 +25,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import time
 from pathlib import Path
 
@@ -28,11 +33,39 @@ logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "cli-orchestrator"
 
+# How the agent should invoke each capable CLI when delegating heavy work.
+# Kept here (not in the dashboard backend) because it's runtime guidance the
+# orchestrator model reads. Only CLIs actually installed are surfaced.
+DELEGATION_HINTS = {
+    "codex": "run `codex exec \"<task>\"` via the terminal tool (non-interactive, free via ChatGPT sub)",
+    "claude": "run `claude -p \"<task>\"` via the terminal tool, or load the `claude-code` skill",
+    "gemini": "run `gemini -p \"<task>\"` via the terminal tool",
+    "qwen": "run `qwen -p \"<task>\"` via the terminal tool (free Qwen OAuth)",
+    "opencode": "run `opencode run \"<task>\"` via the terminal tool, or load the `opencode` skill",
+    "crush": "run `crush run \"<task>\"` via the terminal tool",
+    "amp": "run `amp -x \"<task>\"` via the terminal tool",
+    "cursor-agent": "run `cursor-agent -p \"<task>\"` via the terminal tool",
+    "goose": "run `goose run -t \"<task>\"` via the terminal tool",
+    "aider": "run `aider --message \"<task>\"` via the terminal tool",
+    "copilot": "use the `copilot` CLI via the terminal tool",
+}
+# Capable coding CLIs, in default priority order (used when no explicit
+# orchestration-matrix rule maps an intent to a CLI).
+CODING_PRIORITY = ("codex", "claude", "qwen", "opencode", "crush", "amp",
+                   "cursor-agent", "goose", "aider", "gemini", "copilot")
+
 # Binaries we count. Mirrors dashboard/plugin_api.py DEFAULT_CATALOG ids/bins.
 TRACKED_BINS = {
     "claude": "claude",
     "codex": "codex",
     "gemini": "gemini",
+    "qwen": "qwen",
+    "cursor-agent": "cursor-agent",
+    "amp": "amp",
+    "crush": "crush",
+    "goose": "goose",
+    "mods": "mods",
+    "llm": "llm",
     "opencode": "opencode",
     "aider": "aider",
     "copilot": "copilot",
@@ -127,6 +160,90 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, task_id=None, **k
         logger.debug("cli-orchestrator usage hook skipped: %s", exc)
 
 
+_LOCAL_PROVIDERS = {"custom", "ollama", "local", "vllm", "llamacpp", "llama.cpp", "llama-cpp"}
+
+
+def _primary_is_local() -> bool:
+    """True when the active primary model is a weak local one (Ollama/etc.).
+
+    The delegation policy only makes sense when a cheap local model is
+    orchestrating. When the primary is already a capable provider (Codex,
+    Copilot, …), it handles heavy work directly and the policy would just be
+    redundant noise — so we suppress it.
+    """
+    try:
+        import yaml
+        cfg = yaml.safe_load(open(_hermes_home() / "config.yaml")) or {}
+        m = cfg.get("model")
+        provider = (m.get("provider") if isinstance(m, dict) else "") or ""
+        return provider.strip().lower() in _LOCAL_PROVIDERS
+    except Exception:
+        return True  # unknown → assume local so we don't lose routing guidance
+
+
+def _over_cap(cli_id: str, state: dict) -> bool:
+    """True if this CLI is at/over its daily cap (so we shouldn't route to it)."""
+    cap = (state.get("limits", {}).get(cli_id) or {}).get("daily", 0) or 0
+    if cap <= 0:
+        return False
+    events = state.get("usage", {}).get(cli_id, [])
+    now = time.time()
+    return sum(1 for t in events if t >= now - 86400) >= cap
+
+
+def _on_pre_llm_call(session_id=None, user_message=None, model=None,
+                     is_first_turn=False, **kwargs):
+    """Inject a routing policy so a cheap local model delegates heavy work to CLIs.
+
+    Returns a context string (appended to the user turn) listing which capable
+    CLIs are available and how to delegate to them. Respects the orchestration
+    matrix (intent -> CLI) and daily caps. Returns None (no injection) when no
+    capable CLI is installed — then the local model just answers normally.
+    """
+    try:
+        if not _primary_is_local():
+            return None  # capable primary handles heavy work directly — no policy needed
+        state = _read_state()
+        installed = {cid: b for cid, b in TRACKED_BINS.items() if shutil.which(b)}
+        # Capable coding CLIs that are installed AND under their cap.
+        capable = [c for c in CODING_PRIORITY
+                   if c in installed and not _over_cap(c, state)]
+        if not capable:
+            return None  # nothing to delegate to → local model handles it all
+
+        lines = [
+            "[CLI Orchestrator — routing policy]",
+            "You are a local orchestrator on a small free model. Do NOT attempt "
+            "high-intensity work yourself — DELEGATE it to a capable local CLI by "
+            "actually CALLING the `terminal` tool (emit a real tool call; do NOT "
+            "just print the command in a code block). After it returns, summarize "
+            "or verify the result:",
+        ]
+        # Explicit orchestration-matrix rules take precedence.
+        rules = [r for r in (state.get("routing") or [])
+                 if r.get("cli") in capable]
+        seen_intents = set()
+        for r in rules:
+            cli = r["cli"]
+            seen_intents.add(r.get("intent", "").lower())
+            lines.append(f"- {r.get('intent')}: delegate to `{cli}` — "
+                        f"{DELEGATION_HINTS.get(cli, 'via the terminal tool')}.")
+        # Default code-gen rule if the matrix didn't cover it.
+        if not any("cod" in i or "gen" in i or "dev" in i for i in seen_intents):
+            top = capable[0]
+            lines.append(f"- Code generation / refactors / multi-file edits / "
+                        f"debugging: delegate to `{top}` — {DELEGATION_HINTS.get(top)}.")
+        lines.append("- Image generation: use the image_generation tool.")
+        lines.append("- Simple questions, planning, summaries: answer directly "
+                    "(no delegation).")
+        lines.append(f"Capable CLIs available now (priority order): "
+                    f"{', '.join(capable)}.")
+        return {"context": "\n".join(lines)}
+    except Exception as exc:  # never break the turn
+        logger.debug("cli-orchestrator routing policy skipped: %s", exc)
+        return None
+
+
 def _handle_cli_command(raw_args: str):
     """/cli — quick status of tracked CLIs and their usage today."""
     import shutil
@@ -153,6 +270,7 @@ def register(ctx):
     """Wire the runtime hook + slash command. Called once at startup; if it
     raises, Hermes disables this plugin but keeps running."""
     ctx.register_hook("post_tool_call", _on_post_tool_call)
+    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     try:
         ctx.register_command(
             "cli",
