@@ -266,6 +266,88 @@ def _handle_cli_command(raw_args: str):
     return "\n".join(lines)
 
 
+# ── Music generation tool (Hermes has no native music framework) ────────────
+# Provides a `generate_music` tool backed by Replicate MusicGen. Requires
+# REPLICATE_API_TOKEN (managed via the Media panel). ⚠️ UNVERIFIED: written
+# against Replicate's documented predictions API but not run without a token.
+MUSIC_SCHEMA = {
+    "name": "generate_music",
+    "description": (
+        "Generate a short instrumental music clip from a text prompt using "
+        "Replicate's MusicGen model. Use when the user asks to compose/generate "
+        "music or a melody. Requires REPLICATE_API_TOKEN. Returns the path to a "
+        "saved audio file."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string",
+                       "description": "Music description: style, mood, instruments, tempo"},
+            "duration": {"type": "integer",
+                         "description": "Clip length in seconds (default 8, max 30)"},
+        },
+        "required": ["prompt"],
+    },
+}
+
+
+def _save_audio_bytes(data: bytes, ext: str = "wav") -> str:
+    import datetime
+    import uuid
+    d = _hermes_home() / "cache" / "audio"
+    d.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = d / f"musicgen_{ts}_{uuid.uuid4().hex[:8]}.{ext}"
+    path.write_bytes(data)
+    return str(path)
+
+
+def _generate_music(args: dict, **kwargs) -> str:
+    """Tool handler — always returns a JSON string, never raises."""
+    prompt = (args.get("prompt") or "").strip() if isinstance(args, dict) else ""
+    try:
+        duration = int(args.get("duration") or 8) if isinstance(args, dict) else 8
+    except Exception:
+        duration = 8
+    if not prompt:
+        return json.dumps({"error": "prompt is required"})
+    token = (os.environ.get("REPLICATE_API_TOKEN") or "").strip()
+    if not token:
+        return json.dumps({"error": "REPLICATE_API_TOKEN not set — add it in the CLI Matrix Media panel."})
+    try:
+        import httpx
+        headers = {"Authorization": f"Bearer {token}",
+                   "Content-Type": "application/json", "Prefer": "wait"}
+        body = {"input": {"prompt": prompt,
+                          "duration": max(1, min(30, duration)),
+                          "model_version": "stereo-melody-large",
+                          "output_format": "wav"}}
+        url = "https://api.replicate.com/v1/models/meta/musicgen/predictions"
+        with httpx.Client(timeout=httpx.Timeout(300.0, read=300.0)) as http:
+            r = http.post(url, headers=headers, json=body)
+            r.raise_for_status()
+            pred = r.json()
+            status = pred.get("status")
+            get_url = (pred.get("urls") or {}).get("get")
+            deadline = time.time() + 300
+            while status not in ("succeeded", "failed", "canceled") and get_url and time.time() < deadline:
+                time.sleep(3)
+                pred = http.get(get_url, headers=headers).json()
+                status = pred.get("status")
+            if status != "succeeded":
+                return json.dumps({"error": f"MusicGen status: {status}", "detail": pred.get("error")})
+            out = pred.get("output")
+            audio_url = out[0] if isinstance(out, list) and out else out
+            if not audio_url:
+                return json.dumps({"error": "no audio output from MusicGen"})
+            data = http.get(audio_url, follow_redirects=True).content
+        path = _save_audio_bytes(data, ext="wav")
+        return json.dumps({"ok": True, "audio": path, "prompt": prompt,
+                           "provider": "replicate-musicgen"})
+    except Exception as exc:
+        return json.dumps({"error": f"music generation failed: {exc}"})
+
+
 def register(ctx):
     """Wire the runtime hook + slash command. Called once at startup; if it
     raises, Hermes disables this plugin but keeps running."""
@@ -280,3 +362,12 @@ def register(ctx):
     except Exception as exc:
         # register_command is newer; tolerate older Hermes that lack it.
         logger.debug("cli-orchestrator: /cli command not registered: %s", exc)
+    try:
+        ctx.register_tool(
+            name="generate_music",
+            toolset="cli-orchestrator",
+            schema=MUSIC_SCHEMA,
+            handler=_generate_music,
+        )
+    except Exception as exc:
+        logger.debug("cli-orchestrator: generate_music tool not registered: %s", exc)
