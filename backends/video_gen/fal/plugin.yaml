@@ -1,0 +1,5 @@
+name: fal
+version: 0.1.0
+description: "fal.ai text-to-video backend (LTX/Kling/WAN) via REST queue API. Needs FAL_KEY."
+author: hermes-cli-orchestrator
+kind: backend
