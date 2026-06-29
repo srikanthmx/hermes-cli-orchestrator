@@ -1,0 +1,9 @@
+name: cli-orchestrator
+version: 0.1.0
+author: hermes-cli-governor
+description: >-
+  Local CLI manager & orchestration matrix. Ships a "CLI Matrix" dashboard tab
+  (see dashboard/) plus a post_tool_call hook that tallies how often the agent
+  drives each local worker CLI, and a /cli slash command for a quick status read.
+provides_hooks:
+  - post_tool_call
