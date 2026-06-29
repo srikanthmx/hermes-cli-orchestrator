@@ -540,9 +540,9 @@ MEDIA_CATALOG: List[Dict[str, Any]] = [
     {"id": "whisper-openai", "name": "OpenAI Whisper", "category": "Speech-to-Text", "kind": "native",
      "mechanism": "STT", "env": ["OPENAI_API_KEY"],
      "signup": "https://platform.openai.com/api-keys", "docs": "https://platform.openai.com/docs/guides/speech-to-text"},
-    {"id": "whisper-local", "name": "whisper.cpp (local)", "category": "Speech-to-Text", "kind": "native",
-     "mechanism": "local STT command", "env": [], "bin": "whisper",
-     "signup": "", "docs": "https://github.com/ggerganov/whisper.cpp"},
+    {"id": "whisper-local", "name": "faster-whisper (local)", "category": "Speech-to-Text", "kind": "native",
+     "mechanism": "Hermes default STT — free, no key (verified)", "env": [], "module": "faster_whisper",
+     "signup": "", "docs": "https://github.com/SYSTRAN/faster-whisper"},
     # ── Image generation ─────────────────────────────────────────────────────
     {"id": "pollinations", "name": "Pollinations (free)", "category": "Image", "kind": "plugin",
      "mechanism": "image_gen plugin — free, no key (verified, bundled with this tool)",
@@ -615,7 +615,10 @@ async def media_scan():
     rows: List[Dict[str, Any]] = []
     for m in MEDIA_CATALOG:
         envs = m.get("env", [])
-        if m.get("keyless"):
+        if m.get("module"):  # local python backend — configured if importable
+            import importlib.util as _il
+            configured = _il.find_spec(m["module"]) is not None
+        elif m.get("keyless"):
             configured = True  # free, no key required — works out of the box
         elif envs:
             configured = all(_key_present(e, env_file) for e in envs)
