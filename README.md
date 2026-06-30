@@ -98,6 +98,32 @@ Free local speech-to-text just needs the dependency: `uv pip install -p ~/.herme
 
 ---
 
+## Remote control (Telegram / gateway)
+
+All settings are reachable from any Hermes gateway (Telegram, Discord, …) via
+`cli-` prefixed slash commands — so you can manage the governor from your phone:
+
+| Command | Does |
+|---------|------|
+| `/cli-status` | CLI status + usage today |
+| `/cli-scan` | re-detect installed CLIs |
+| `/cli-limit <cli> <daily> [hourly] [monthly]` | set usage caps |
+| `/cli-route <cli> <intent…>` | map an intent to a CLI |
+| `/cli-routes` | list routing rules |
+| `/cli-install <cli> [manager]` | install a CLI |
+| `/cli-media` | media backend status |
+| `/cli-help` | list commands |
+
+`/cli <subcommand>` works too (e.g. `/cli limit codex 200`) — handy because
+Telegram's command **menu** only autocompletes `[a-z0-9_]` names, so the
+hyphenated forms work when typed but may not appear in the `/` menu.
+
+Gate access with `hermes pairing` (only authorized DMs) and per-platform slash
+controls. **Media API keys are intentionally *not* settable over chat** (they'd
+land in chat history) — set those on the loopback dashboard.
+
+---
+
 ## Media backends — what works today
 
 | Category | Backend | Status |

@@ -266,6 +266,186 @@ def _handle_cli_command(raw_args: str):
     return "\n".join(lines)
 
 
+# ── Telegram/gateway slash commands (all prefixed `cli-`) ───────────────────
+# These let you drive the plugin's settings remotely from any Hermes gateway
+# (Telegram, Discord, …). Hermes preserves hyphens in command names, so they
+# dispatch when typed; Telegram's autocomplete menu only lists [a-z0-9_] names,
+# so hyphenated ones work-when-typed but may not appear in the `/` menu.
+# Note: media API KEYS are deliberately NOT settable here — keys would land in
+# chat history. Set those on the loopback dashboard.
+
+_BACKEND = None
+
+
+def _backend():
+    """Lazy-load the dashboard backend module to reuse its catalogs + helpers
+    (single source of truth; no duplication)."""
+    global _BACKEND
+    if _BACKEND is None:
+        import importlib.util
+        path = Path(__file__).parent / "dashboard" / "plugin_api.py"
+        spec = importlib.util.spec_from_file_location("cli_orchestrator_backend", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _BACKEND = mod
+    return _BACKEND
+
+
+def _cmd_status(raw_args: str = "") -> str:
+    return _handle_cli_command(raw_args)
+
+
+def _cmd_scan(raw_args: str = "") -> str:
+    present = [b for b in TRACKED_BINS.values() if shutil.which(b)]
+    missing = [b for b in TRACKED_BINS.values() if not shutil.which(b)]
+    return (f"CLI scan — {len(present)}/{len(TRACKED_BINS)} installed\n"
+            f"  ● {', '.join(present) or '(none)'}\n"
+            f"  ○ {', '.join(missing) or '(none)'}")
+
+
+def _cmd_limit(raw_args: str = "") -> str:
+    parts = (raw_args or "").split()
+    if len(parts) < 2:
+        return "Usage: /cli-limit <cli> <daily> [hourly] [monthly]"
+    cli_id = parts[0]
+    try:
+        daily = int(parts[1])
+        hourly = int(parts[2]) if len(parts) > 2 else 0
+        monthly = int(parts[3]) if len(parts) > 3 else 0
+    except ValueError:
+        return "Caps must be integers. Usage: /cli-limit <cli> <daily> [hourly] [monthly]"
+    state = _read_state()
+    state.setdefault("limits", {})[cli_id] = {"hourly": hourly, "daily": daily, "monthly": monthly}
+    _write_state(state)
+    return f"Set {cli_id} caps → daily {daily}, hourly {hourly}, monthly {monthly}"
+
+
+def _cmd_route(raw_args: str = "") -> str:
+    parts = (raw_args or "").split(maxsplit=1)
+    if len(parts) < 2:
+        return "Usage: /cli-route <cli> <intent words…>   e.g. /cli-route codex code generation"
+    cli_id, intent = parts[0], parts[1].strip()
+    state = _read_state()
+    rules = [r for r in state.get("routing", []) if r.get("intent", "").lower() != intent.lower()]
+    rules.append({"intent": intent, "cli": cli_id})
+    state["routing"] = rules
+    _write_state(state)
+    return f"Routed '{intent}' → {cli_id}"
+
+
+def _cmd_routes(raw_args: str = "") -> str:
+    rules = _read_state().get("routing", [])
+    if not rules:
+        return "No routing rules. Add one with /cli-route <cli> <intent…>"
+    return "Routing rules:\n" + "\n".join(f"  {r['intent']} → {r['cli']}" for r in rules)
+
+
+def _cmd_install(raw_args: str = "") -> str:
+    parts = (raw_args or "").split()
+    if not parts:
+        return "Usage: /cli-install <cli> [manager]"
+    cli_id = parts[0]
+    manager = parts[1] if len(parts) > 1 else None
+    try:
+        cat = {c["id"]: c for c in _backend().load_catalog()}
+    except Exception as exc:
+        return f"Catalog unavailable: {exc}"
+    entry = cat.get(cli_id)
+    if not entry:
+        return f"Unknown CLI: {cli_id}"
+    installers = entry.get("install") or {}
+    if not installers:
+        return f"No install command known for {cli_id}"
+    mgr = manager or next(iter(installers))
+    cmd = installers.get(mgr)
+    if not cmd:
+        return f"No '{mgr}' installer for {cli_id} (have: {', '.join(installers)})"
+    import subprocess
+    logdir = _hermes_home() / PLUGIN_ID / "logs"
+    logdir.mkdir(parents=True, exist_ok=True)
+    fh = open(logdir / f"{cli_id}.log", "w", encoding="utf-8")
+    fh.write(f"$ {cmd}\n\n")
+    fh.flush()
+    subprocess.Popen(cmd, shell=True, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+    return f"Installing {cli_id} via {mgr} …  (`{cmd}`)"
+
+
+def _cmd_media(raw_args: str = "") -> str:
+    try:
+        import importlib.util as _il
+        b = _backend()
+        cat = b.MEDIA_CATALOG
+        env_file = b._read_env_file()
+    except Exception as exc:
+        return f"Media catalog unavailable: {exc}"
+    from collections import defaultdict
+    groups: dict = defaultdict(list)
+    for m in cat:
+        envs = m.get("env", [])
+        if m.get("module"):
+            conf = _il.find_spec(m["module"]) is not None
+        elif m.get("keyless"):
+            conf = True
+        elif envs:
+            conf = all(b._key_present(e, env_file) for e in envs)
+        else:
+            conf = False
+        groups[m["category"]].append((m["name"], m["kind"], conf))
+    lines = ["Media backends (✓ configured / ○):"]
+    for cat_name, items in groups.items():
+        lines.append(f" {cat_name}:")
+        for name, kind, conf in items:
+            lines.append(f"   {'✓' if conf else '○'} {name} [{kind}]")
+    lines.append("(Set media keys on the dashboard, not Telegram — keys would be in chat history.)")
+    return "\n".join(lines)
+
+
+def _cmd_help(raw_args: str = "") -> str:
+    return (
+        "CLI Orchestrator — remote commands:\n"
+        "  /cli-status                       CLI status + usage today\n"
+        "  /cli-scan                         re-detect installed CLIs\n"
+        "  /cli-limit <cli> <daily> [hr] [mo]  set usage caps\n"
+        "  /cli-route <cli> <intent…>        map an intent to a CLI\n"
+        "  /cli-routes                       list routing rules\n"
+        "  /cli-install <cli> [manager]      install a CLI\n"
+        "  /cli-media                        media backend status\n"
+        "  /cli-help                         this help\n"
+        "(Also works as /cli <subcommand>.)"
+    )
+
+
+# Subcommand dispatch so `/cli <sub>` works too (guaranteed Telegram-friendly).
+_SUBCMDS = {
+    "status": _cmd_status, "scan": _cmd_scan, "limit": _cmd_limit,
+    "route": _cmd_route, "routes": _cmd_routes, "install": _cmd_install,
+    "media": _cmd_media, "help": _cmd_help,
+}
+
+# (name, handler, description) for the cli-* family + the `cli` dispatcher.
+_CLI_COMMANDS = [
+    ("cli-status", _cmd_status, "CLI status + usage"),
+    ("cli-scan", _cmd_scan, "Re-detect installed CLIs"),
+    ("cli-limit", _cmd_limit, "Set caps: <cli> <daily> [hourly] [monthly]"),
+    ("cli-route", _cmd_route, "Route an intent: <cli> <intent…>"),
+    ("cli-routes", _cmd_routes, "List routing rules"),
+    ("cli-install", _cmd_install, "Install a CLI: <cli> [manager]"),
+    ("cli-media", _cmd_media, "Media backend status"),
+    ("cli-help", _cmd_help, "List CLI Orchestrator commands"),
+]
+
+
+def _cmd_dispatch(raw_args: str = "") -> str:
+    raw = (raw_args or "").strip()
+    if not raw:
+        return _cmd_status("")
+    parts = raw.split(maxsplit=1)
+    fn = _SUBCMDS.get(parts[0].lower())
+    if not fn:
+        return f"Unknown subcommand '{parts[0]}'.\n\n" + _cmd_help("")
+    return fn(parts[1] if len(parts) > 1 else "")
+
+
 # ── Music generation tool (Hermes has no native music framework) ────────────
 # Provides a `generate_music` tool backed by Replicate MusicGen. Requires
 # REPLICATE_API_TOKEN (managed via the Media panel). ⚠️ UNVERIFIED: written
@@ -353,15 +533,17 @@ def register(ctx):
     raises, Hermes disables this plugin but keeps running."""
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    # `/cli <subcommand>` dispatcher (Telegram-friendly) + the cli-* family.
     try:
         ctx.register_command(
-            "cli",
-            handler=_handle_cli_command,
-            description="Show local CLI status + usage (CLI Orchestrator)",
+            "cli", handler=_cmd_dispatch,
+            description="CLI Orchestrator (status|scan|limit|route|routes|install|media|help)",
         )
+        for _name, _fn, _desc in _CLI_COMMANDS:
+            ctx.register_command(_name, handler=_fn, description=_desc)
     except Exception as exc:
         # register_command is newer; tolerate older Hermes that lack it.
-        logger.debug("cli-orchestrator: /cli command not registered: %s", exc)
+        logger.debug("cli-orchestrator: slash commands not registered: %s", exc)
     try:
         ctx.register_tool(
             name="generate_music",
