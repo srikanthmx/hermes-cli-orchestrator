@@ -142,7 +142,12 @@
             h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, c.category),
             c.plan ? h("span", { className: "text-[11px] text-emerald-400/80" }, c.plan) : null
           ),
-          StatusBadge(c.status, c.auth)
+          h("div", { className: "flex flex-col items-end gap-1" },
+            StatusBadge(c.status, c.auth),
+            c.worker ? h("span", {
+              className: "inline-flex items-center border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-courier uppercase tracking-wider text-emerald-300",
+            }, "worker #" + c.worker_rank) : null
+          )
         )
       ),
       h(C.CardContent, { className: "flex flex-col gap-3 text-sm" },
@@ -383,42 +388,6 @@
     );
   }
 
-  // ── provider / model usage (what's actually serving the agent) ────────────
-  function ProviderUsagePanel() {
-    var st = useState({ models: [], total_today: 0 }); var data = st[0], setData = st[1];
-    var load = useCallback(function () {
-      return getJSON("/model-usage").then(setData).catch(function () {});
-    }, []);
-    useEffect(function () { load(); }, [load]);
-    var rows = data.models || [];
-    return h(C.Card, { className: "border-sky-500/20" },
-      h(C.CardHeader, { className: "pb-2" },
-        h("div", { className: "flex items-center justify-between" },
-          h("div", { className: "flex items-center gap-3" },
-            h(C.CardTitle, { className: "text-base font-courier" }, "Provider usage today"),
-            h("span", { className: "text-[11px] text-muted-foreground" }, "turns per model — your actual model/subscription burn")
-          ),
-          h("button", { onClick: load,
-            className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer" }, "⟳")
-        )
-      ),
-      h(C.CardContent, null,
-        rows.length === 0
-          ? h("p", { className: "text-xs text-muted-foreground" }, "No turns recorded yet — talk to the agent and re-scan.")
-          : h("div", { className: "flex flex-col gap-1.5 font-courier text-sm" },
-              rows.map(function (r) {
-                return h("div", { key: r.model, className: "flex items-center justify-between border-b border-border/50 pb-1" },
-                  h("span", null, r.model,
-                    h("span", { className: "ml-2 text-[11px] text-sky-400/80" }, r.provider)),
-                  h("span", { className: "text-muted-foreground" },
-                    h("span", { className: "text-emerald-400" }, r.day), " today · ", r.hour, "/hr · ", r.month, "/mo")
-                );
-              })
-            )
-      )
-    );
-  }
-
   // ── top-level page ───────────────────────────────────────────────────────
   function CliMatrixPage() {
     var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
@@ -462,23 +431,43 @@
             }, "⟳ Re-scan")
           ),
           health ? h("div", { className: "grid grid-cols-2 gap-6 md:grid-cols-5" },
-            Metric(health.installed + "/" + health.total, "Installed", "text-emerald-400"),
-            Metric(health.install_pct + "%", "Coverage"),
-            Metric(health.authenticated + "/" + (health.auth_supported || 0), "Authenticated"),
-            Metric(health.usage_today, "Calls today"),
+            Metric(health.workers_installed || 0, "Local CLI workers", "text-emerald-400"),
+            Metric(health.delegations_today || 0, "Delegations today", "text-emerald-400"),
+            h("div", { className: "flex flex-col gap-0.5 min-w-0" },
+              h("span", { className: "font-courier text-lg leading-tight text-emerald-400 truncate" }, health.active_worker || "—"),
+              h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "Active worker")),
+            h("div", { className: "flex flex-col gap-0.5 min-w-0" },
+              h("span", { className: "font-courier text-lg leading-tight truncate" }, health.brain || "—"),
+              h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "Brain (orchestrator)")),
             h("div", { className: "col-span-2 md:col-span-1" },
-              Gauge(health.daily_budget_used_pct, "Daily cap margin",
-                health.daily_budget_used_pct >= 90 ? "near subscription limit" : "within safe margin"))
-          ) : null
+              Gauge(health.daily_budget_used_pct, "Cap margin",
+                health.daily_budget_used_pct >= 90 ? "near a CLI's cap" : "within safe margin"))
+          ) : null,
+          // delegation priority / fallback order
+          (function () {
+            var ws = clis.filter(function (c) { return c.worker; })
+              .sort(function (a, b) { return (a.worker_rank || 99) - (b.worker_rank || 99); });
+            return ws.length ? h("div", { className: "flex flex-wrap items-center gap-2 border-t border-border pt-3" },
+              h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "delegation priority →"),
+              ws.map(function (c, i) {
+                var cap = (c.limits && c.limits.daily) || 0;
+                var over = cap > 0 && c.usage && c.usage.day >= cap;
+                var s = !c.installed
+                  ? ["○ missing", "text-zinc-500 border-zinc-600/40"]
+                  : over ? ["⚠ at cap", "text-amber-400 border-amber-500/40"]
+                         : ["● ready", "text-emerald-400 border-emerald-500/40"];
+                return h("span", { key: c.id,
+                  className: cn("inline-flex items-center gap-1.5 border px-2 py-0.5 text-[11px] font-courier", s[1]) },
+                  (i + 1) + ". " + c.id, h("span", { className: "opacity-70" }, s[0]));
+              })
+            ) : null;
+          })()
         )
       ),
 
       err ? h(C.Card, { className: "border-rose-500/40" },
         h(C.CardContent, { className: "py-3 text-sm text-rose-400" },
           "Backend error: " + err + " (is the dashboard running with the plugin loaded?)")) : null,
-
-      // ── provider/model usage (the real subscription-burn metric) ──
-      h(ProviderUsagePanel, null),
 
       // ── CLI cards by category ──
       cats.map(function (cat) {

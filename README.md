@@ -112,7 +112,14 @@ All settings are reachable from any Hermes gateway (Telegram, Discord, …) via
 | `/cli-routes` | list routing rules |
 | `/cli-install <cli> [manager]` | install a CLI |
 | `/cli-media` | media backend status |
+| `/cli-delegate <task>` | **run a task on a local worker CLI** (caps + fallback + usage) |
+| `/cli-usage` | provider / model (brain) usage |
 | `/cli-help` | list commands |
+
+`/cli-delegate` is the reliable way to put a **local CLI to work** without depending
+on a weak model to emit a tool call — it routes to the highest-priority available
+CLI, skips any over its cap, falls back on rate-limit, and records the usage the
+dashboard shows.
 
 `/cli <subcommand>` works too (e.g. `/cli limit codex 200`) — handy because
 Telegram's command **menu** only autocompletes `[a-z0-9_]` names, so the

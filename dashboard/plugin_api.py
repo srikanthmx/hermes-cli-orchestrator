@@ -215,6 +215,11 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
 ]
 
 
+# Delegation-capable worker CLIs, in fallback priority order (mirrors
+# __init__.py DELEGATE_ARGV + CODING_PRIORITY). Used to mark "workers" in scan.
+_DELEGATE_PRIORITY = ["codex", "claude", "qwen", "opencode", "gemini"]
+
+
 def load_catalog() -> List[Dict[str, Any]]:
     """Default catalog merged with an optional user catalog.json (by id)."""
     catalog = {c["id"]: dict(c) for c in DEFAULT_CATALOG}
@@ -343,6 +348,8 @@ async def scan():
             "status": status,
             "provider": c.get("provider"),
             "plan": c.get("plan"),
+            "worker": c["id"] in _DELEGATE_PRIORITY,
+            "worker_rank": (_DELEGATE_PRIORITY.index(c["id"]) + 1) if c["id"] in _DELEGATE_PRIORITY else None,
             "install_managers": list((c.get("install") or {}).keys()),
             "docs": c.get("docs"),
             "limits": limits.get(c["id"], {"hourly": 0, "daily": 0, "monthly": 0}),
@@ -525,6 +532,30 @@ async def health():
         cap = (c.get("limits") or {}).get("daily", 0) or 0
         if cap > 0:
             worst = max(worst, min(1.0, c["usage"]["day"] / cap))
+    # Worker fleet: installed delegation workers, delegations today, active one.
+    by_id = {c["id"]: c for c in data}
+    workers_installed = sum(1 for w in _DELEGATE_PRIORITY
+                            if by_id.get(w, {}).get("installed"))
+    delegations_today = sum(by_id.get(w, {}).get("usage", {}).get("day", 0)
+                            for w in _DELEGATE_PRIORITY)
+    active_worker = None
+    for w in _DELEGATE_PRIORITY:
+        row = by_id.get(w)
+        if row and row["installed"]:
+            cap = (row.get("limits") or {}).get("daily", 0) or 0
+            if not (cap > 0 and row["usage"]["day"] >= cap):
+                active_worker = w
+                break
+    # Active brain (the model Hermes is running as its orchestrator).
+    brain = None
+    try:
+        import yaml
+        cfg = yaml.safe_load(open(hermes_home() / "config.yaml")) or {}
+        mc = cfg.get("model") or {}
+        if isinstance(mc, dict):
+            brain = mc.get("default") or mc.get("model")
+    except Exception:
+        pass
     return {
         "total": total,
         "installed": installed,
@@ -533,6 +564,10 @@ async def health():
         "auth_supported": auth_supported,
         "daily_budget_used_pct": round(100 * worst),
         "usage_today": sum(c["usage"]["day"] for c in data),
+        "workers_installed": workers_installed,
+        "delegations_today": delegations_today,
+        "active_worker": active_worker,
+        "brain": brain,
     }
 
 
