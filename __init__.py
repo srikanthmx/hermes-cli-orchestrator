@@ -244,6 +244,39 @@ def _on_pre_llm_call(session_id=None, user_message=None, model=None,
         return None
 
 
+def _provider_for_model(model: str) -> str:
+    """Map a model id to its Hermes provider using the active config chain."""
+    try:
+        import yaml
+        cfg = yaml.safe_load(open(_hermes_home() / "config.yaml")) or {}
+        m = cfg.get("model") or {}
+        if isinstance(m, dict) and model in ((m.get("default") or ""), (m.get("model") or "")):
+            return m.get("provider") or "?"
+        for f in (cfg.get("fallback_providers") or []):
+            if f.get("model") == model:
+                return f.get("provider") or "?"
+    except Exception:
+        pass
+    return "?"
+
+
+def _on_post_llm_call(session_id=None, model=None, platform=None, **kwargs):
+    """Fires once per successful turn. Records which model/provider served it —
+    this is the real 'what's burning my subscription' metric (vs CLI shell-outs)."""
+    try:
+        if not model:
+            return
+        state = _read_state()
+        mu = state.setdefault("model_usage", {})
+        events = mu.setdefault(str(model), [])
+        now = time.time()
+        events.append(now)
+        mu[str(model)] = [t for t in events if t >= now - 3456000]  # keep ~40 days
+        _write_state(state)
+    except Exception as exc:  # never break the turn
+        logger.debug("cli-orchestrator model-usage hook skipped: %s", exc)
+
+
 def _handle_cli_command(raw_args: str):
     """/cli — quick status of tracked CLIs and their usage today."""
     import shutil
@@ -340,6 +373,24 @@ def _cmd_routes(raw_args: str = "") -> str:
     return "Routing rules:\n" + "\n".join(f"  {r['intent']} → {r['cli']}" for r in rules)
 
 
+def _cmd_usage(raw_args: str = "") -> str:
+    state = _read_state()
+    mu = state.get("model_usage", {})
+    if not mu:
+        return "No model/provider usage recorded yet. (Talk to the agent, then check again.)"
+    now = time.time()
+    rows = []
+    for model, events in mu.items():
+        rows.append((model, _provider_for_model(model),
+                     sum(1 for t in events if t >= now - 3600),
+                     sum(1 for t in events if t >= now - 86400)))
+    rows.sort(key=lambda r: -r[3])
+    lines = ["Provider / model usage (turns):", "  model (provider)      hour / today"]
+    for model, prov, hr, day in rows:
+        lines.append(f"  {model} ({prov}): {hr} / {day}")
+    return "\n".join(lines)
+
+
 def _cmd_install(raw_args: str = "") -> str:
     parts = (raw_args or "").split()
     if not parts:
@@ -410,6 +461,7 @@ def _cmd_help(raw_args: str = "") -> str:
         "  /cli-routes                       list routing rules\n"
         "  /cli-install <cli> [manager]      install a CLI\n"
         "  /cli-media                        media backend status\n"
+        "  /cli-usage                        provider / model usage (turns)\n"
         "  /cli-help                         this help\n"
         "(Also works as /cli <subcommand>.)"
     )
@@ -419,7 +471,7 @@ def _cmd_help(raw_args: str = "") -> str:
 _SUBCMDS = {
     "status": _cmd_status, "scan": _cmd_scan, "limit": _cmd_limit,
     "route": _cmd_route, "routes": _cmd_routes, "install": _cmd_install,
-    "media": _cmd_media, "help": _cmd_help,
+    "media": _cmd_media, "usage": _cmd_usage, "help": _cmd_help,
 }
 
 # (name, handler, description) for the cli-* family + the `cli` dispatcher.
@@ -431,6 +483,7 @@ _CLI_COMMANDS = [
     ("cli-routes", _cmd_routes, "List routing rules"),
     ("cli-install", _cmd_install, "Install a CLI: <cli> [manager]"),
     ("cli-media", _cmd_media, "Media backend status"),
+    ("cli-usage", _cmd_usage, "Provider / model usage (turns)"),
     ("cli-help", _cmd_help, "List CLI Orchestrator commands"),
 ]
 
@@ -533,6 +586,7 @@ def register(ctx):
     raises, Hermes disables this plugin but keeps running."""
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("post_llm_call", _on_post_llm_call)
     # `/cli <subcommand>` dispatcher (Telegram-friendly) + the cli-* family.
     try:
         ctx.register_command(

@@ -383,6 +383,42 @@
     );
   }
 
+  // ── provider / model usage (what's actually serving the agent) ────────────
+  function ProviderUsagePanel() {
+    var st = useState({ models: [], total_today: 0 }); var data = st[0], setData = st[1];
+    var load = useCallback(function () {
+      return getJSON("/model-usage").then(setData).catch(function () {});
+    }, []);
+    useEffect(function () { load(); }, [load]);
+    var rows = data.models || [];
+    return h(C.Card, { className: "border-sky-500/20" },
+      h(C.CardHeader, { className: "pb-2" },
+        h("div", { className: "flex items-center justify-between" },
+          h("div", { className: "flex items-center gap-3" },
+            h(C.CardTitle, { className: "text-base font-courier" }, "Provider usage today"),
+            h("span", { className: "text-[11px] text-muted-foreground" }, "turns per model — your actual model/subscription burn")
+          ),
+          h("button", { onClick: load,
+            className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer" }, "⟳")
+        )
+      ),
+      h(C.CardContent, null,
+        rows.length === 0
+          ? h("p", { className: "text-xs text-muted-foreground" }, "No turns recorded yet — talk to the agent and re-scan.")
+          : h("div", { className: "flex flex-col gap-1.5 font-courier text-sm" },
+              rows.map(function (r) {
+                return h("div", { key: r.model, className: "flex items-center justify-between border-b border-border/50 pb-1" },
+                  h("span", null, r.model,
+                    h("span", { className: "ml-2 text-[11px] text-sky-400/80" }, r.provider)),
+                  h("span", { className: "text-muted-foreground" },
+                    h("span", { className: "text-emerald-400" }, r.day), " today · ", r.hour, "/hr · ", r.month, "/mo")
+                );
+              })
+            )
+      )
+    );
+  }
+
   // ── top-level page ───────────────────────────────────────────────────────
   function CliMatrixPage() {
     var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
@@ -440,6 +476,9 @@
       err ? h(C.Card, { className: "border-rose-500/40" },
         h(C.CardContent, { className: "py-3 text-sm text-rose-400" },
           "Backend error: " + err + " (is the dashboard running with the plugin loaded?)")) : null,
+
+      // ── provider/model usage (the real subscription-burn metric) ──
+      h(ProviderUsagePanel, null),
 
       // ── CLI cards by category ──
       cats.map(function (cat) {

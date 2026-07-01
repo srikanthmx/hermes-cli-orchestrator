@@ -479,6 +479,39 @@ async def install_status(id: str):
     }
 
 
+def _model_provider_map() -> Dict[str, str]:
+    """Map model id -> provider from the active config chain (best effort)."""
+    out: Dict[str, str] = {}
+    try:
+        import yaml
+        cfg = yaml.safe_load(open(hermes_home() / "config.yaml")) or {}
+        m = cfg.get("model") or {}
+        if isinstance(m, dict):
+            name = m.get("default") or m.get("model")
+            if name:
+                out[str(name)] = m.get("provider") or "?"
+        for f in (cfg.get("fallback_providers") or []):
+            if f.get("model"):
+                out[str(f["model"])] = f.get("provider") or "?"
+    except Exception:
+        pass
+    return out
+
+
+@router.get("/model-usage")
+async def model_usage():
+    """Per-model/provider turn counts — 'what's burning my subscription'."""
+    state = read_state()
+    mu = state.get("model_usage", {})
+    prov = _model_provider_map()
+    rows = []
+    for model, events in mu.items():
+        w = _windows(events)
+        rows.append({"model": model, "provider": prov.get(model, "?"), **w})
+    rows.sort(key=lambda r: -r["day"])
+    return {"models": rows, "total_today": sum(r["day"] for r in rows)}
+
+
 @router.get("/health")
 async def health():
     data = (await scan())["clis"]
