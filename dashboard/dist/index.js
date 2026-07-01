@@ -388,6 +388,85 @@
     );
   }
 
+  // ── model governor (free-first fallback chain) ────────────────────────────
+  function fmtCooldown(s) {
+    if (!s) return "";
+    var d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), mm = Math.floor((s % 3600) / 60);
+    return d > 0 ? d + "d " + hh + "h" : hh > 0 ? hh + "h " + mm + "m" : mm + "m";
+  }
+  function TierBadge(tier) {
+    var map = {
+      free: ["free", "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"],
+      trial: ["trial", "text-sky-400 border-sky-500/40 bg-sky-500/10"],
+      subscription: ["sub", "text-violet-400 border-violet-500/40 bg-violet-500/10"],
+      cheap: ["cheap", "text-amber-400 border-amber-500/40 bg-amber-500/10"],
+      local: ["local", "text-zinc-400 border-zinc-500/40 bg-zinc-500/10"],
+    };
+    var mm = map[tier] || map.local;
+    return h("span", { className: cn("inline-flex items-center border px-2 py-0.5 text-[10px] font-courier uppercase", mm[1]) }, mm[0]);
+  }
+
+  function ModelGovernorPanel() {
+    var pSt = useState([]); var providers = pSt[0], setProviders = pSt[1];
+    var cSt = useState({ primary: null, fallback: [] }); var chain = cSt[0], setChain = cSt[1];
+    var busySt = useState(false); var busy = busySt[0], setBusy = busySt[1];
+    var load = useCallback(function () {
+      return Promise.all([getJSON("/providers/scan"), getJSON("/providers/chain")])
+        .then(function (r) { setProviders(r[0].providers || []); setChain(r[1] || { primary: null, fallback: [] }); })
+        .catch(function () {});
+    }, []);
+    useEffect(function () { load(); }, [load]);
+
+    function addToChain(p) {
+      var fb = (chain.fallback || []).slice();
+      if (fb.some(function (e) { return e.provider === p.id; })) return;
+      var entry = { provider: p.id, model: p.model };
+      if (p.id === "custom") entry.base_url = "http://localhost:11434/v1";
+      fb.push(entry); setBusy(true);
+      postJSON("/providers/chain", { fallback: fb }).then(load).finally(function () { setBusy(false); });
+    }
+    function removeFromChain(id) {
+      var fb = (chain.fallback || []).filter(function (e) { return e.provider !== id; });
+      setBusy(true);
+      postJSON("/providers/chain", { fallback: fb }).then(load).finally(function () { setBusy(false); });
+    }
+    var primaryProv = chain.primary && chain.primary.provider;
+
+    return h(C.Card, { className: "border-emerald-500/20" },
+      h(C.CardHeader, { className: "pb-2" },
+        h("div", { className: "flex items-center justify-between" },
+          h("div", { className: "flex items-center gap-3" },
+            h(C.CardTitle, { className: "text-base font-courier" }, "Model Governor"),
+            h("span", { className: "text-[11px] text-muted-foreground" }, "free-first fallback — stack many accounts so no single limit stops you")),
+          h("button", { onClick: load, className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer" }, "⟳ Refresh"))),
+      h(C.CardContent, { className: "flex flex-col gap-4" },
+        // active chain
+        h("div", { className: "flex flex-wrap items-center gap-2" },
+          h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "chain →"),
+          primaryProv ? h("span", { className: "inline-flex items-center border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-[11px] font-courier text-violet-300" }, "1. " + primaryProv + " (primary)") : null,
+          (chain.fallback || []).map(function (e, i) {
+            return h("span", { key: e.provider + i, className: "inline-flex items-center gap-1.5 border border-border px-2 py-0.5 text-[11px] font-courier" },
+              (i + 2) + ". " + e.provider,
+              h("button", { onClick: function () { removeFromChain(e.provider); }, className: "text-muted-foreground hover:text-rose-400 cursor-pointer" }, "✕"));
+          })),
+        // registry
+        h("div", { className: "grid grid-cols-1 gap-2 md:grid-cols-2" },
+          providers.map(function (p) {
+            return h("div", { key: p.id, className: "flex items-center justify-between gap-2 border border-border bg-background/30 px-3 py-2" },
+              h("div", { className: "flex flex-col gap-0.5 min-w-0" },
+                h("div", { className: "flex items-center gap-2" },
+                  h("span", { className: "font-courier text-sm truncate" }, p.name), TierBadge(p.tier)),
+                h("div", { className: "flex flex-wrap items-center gap-2 text-[11px]" },
+                  p.authed ? h("span", { className: "text-emerald-400" }, "● authed") : h("span", { className: "text-muted-foreground" }, p.auth === "oauth" ? "○ login" : "○ no key"),
+                  p.position ? h("span", { className: "text-sky-400" }, p.position) : null,
+                  p.cooling_down ? h("span", { className: "text-amber-400" }, "⏳ retry in " + fmtCooldown(p.cooldown_remaining_s)) : null,
+                  h("span", { className: "text-muted-foreground/70" }, p.limit))),
+              h("div", { className: "flex items-center gap-2 shrink-0" },
+                p.signup ? h("a", { href: p.signup, target: "_blank", rel: "noreferrer", className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "get key ↗") : null,
+                p.position ? null : h("button", { onClick: function () { addToChain(p); }, disabled: busy, className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 cursor-pointer" }, "+ chain")));
+          }))));
+  }
+
   // ── top-level page ───────────────────────────────────────────────────────
   function CliMatrixPage() {
     var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
@@ -468,6 +547,9 @@
       err ? h(C.Card, { className: "border-rose-500/40" },
         h(C.CardContent, { className: "py-3 text-sm text-rose-400" },
           "Backend error: " + err + " (is the dashboard running with the plugin loaded?)")) : null,
+
+      // ── model governor (free-first fallback chain) ──
+      h(ModelGovernorPanel, null),
 
       // ── CLI cards by category ──
       cats.map(function (cat) {
