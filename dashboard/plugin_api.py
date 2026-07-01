@@ -775,3 +775,202 @@ async def media_set_key(body: MediaKeyBody):
     except Exception:
         pass
     return {"ok": True, "env": key, "saved": True}  # never echo the value
+
+
+# ===========================================================================
+# Model Governor — free-provider registry, fallback chain, limits & cooldowns.
+#
+# This is the heart of the "governor": know every free/cheap model backend,
+# where to get a key, whether it's authenticated, its place in the fallback
+# chain, and — critically — when an exhausted provider becomes callable again
+# (e.g. "Codex — retry in 28d"). Metadata is curated from Hermes's own provider
+# profiles so it's accurate, and refreshable.
+# ===========================================================================
+
+# tier: free | subscription | trial | cheap | local
+PROVIDERS_CATALOG: List[Dict[str, Any]] = [
+    {"id": "gemini", "name": "Google Gemini", "tier": "free", "auth": "api_key",
+     "env": "GEMINI_API_KEY", "model": "gemini-3.5-flash",
+     "signup": "https://aistudio.google.com/apikey",
+     "limit": "Free AI Studio tier (per-min + daily caps)"},
+    {"id": "qwen-oauth", "name": "Qwen (OAuth)", "tier": "free", "auth": "oauth",
+     "env": "", "model": "qwen3-coder-plus", "signup": "https://chat.qwen.ai",
+     "limit": "~2000 requests/day (free OAuth)"},
+    {"id": "openrouter", "name": "OpenRouter (:free models)", "tier": "free", "auth": "api_key",
+     "env": "OPENROUTER_API_KEY", "model": "deepseek/deepseek-chat-v3.1:free",
+     "signup": "https://openrouter.ai/keys",
+     "limit": "Free `:free` model variants, rate-limited"},
+    {"id": "huggingface", "name": "Hugging Face Inference", "tier": "free", "auth": "api_key",
+     "env": "HF_TOKEN", "model": "Qwen/Qwen3.5-72B-Instruct",
+     "signup": "https://huggingface.co/settings/tokens",
+     "limit": "Free inference API, rate-limited"},
+    {"id": "zai", "name": "Z.ai / GLM", "tier": "free", "auth": "api_key",
+     "env": "GLM_API_KEY", "model": "glm-4-9b", "signup": "https://z.ai/",
+     "limit": "Free GLM-flash tier"},
+    {"id": "nvidia", "name": "NVIDIA NIM", "tier": "trial", "auth": "api_key",
+     "env": "NVIDIA_API_KEY", "model": "nvidia/llama-3.1-nemotron-70b-instruct",
+     "signup": "https://build.nvidia.com/", "limit": "Free credits on signup"},
+    {"id": "novita", "name": "Novita", "tier": "trial", "auth": "api_key",
+     "env": "NOVITA_API_KEY", "model": "moonshotai/kimi-k2.5",
+     "signup": "https://novita.ai/settings/key-management", "limit": "Free credits on signup"},
+    {"id": "gmi", "name": "GMI Cloud", "tier": "trial", "auth": "api_key",
+     "env": "GMI_API_KEY", "model": "zai-org/GLM-5.1-FP8",
+     "signup": "https://www.gmicloud.ai/", "limit": "Free credits"},
+    {"id": "nous", "name": "Nous Research", "tier": "free", "auth": "oauth",
+     "env": "NOUS_API_KEY", "model": "hermes-3-70b",
+     "signup": "https://nousresearch.com/", "limit": "Nous Portal tier"},
+    {"id": "openai-codex", "name": "OpenAI Codex (ChatGPT)", "tier": "subscription", "auth": "oauth",
+     "env": "", "model": "gpt-5.5", "signup": "https://chatgpt.com",
+     "limit": "ChatGPT plan usage cap (weekly/5h)"},
+    {"id": "copilot", "name": "GitHub Copilot", "tier": "subscription", "auth": "oauth",
+     "env": "GITHUB_TOKEN", "model": "gpt-5.4",
+     "signup": "https://github.com/features/copilot", "limit": "Copilot plan limits"},
+    {"id": "deepseek", "name": "DeepSeek", "tier": "cheap", "auth": "api_key",
+     "env": "DEEPSEEK_API_KEY", "model": "deepseek-chat",
+     "signup": "https://platform.deepseek.com/", "limit": "Very cheap (not free)"},
+    {"id": "custom", "name": "Local (Ollama)", "tier": "local", "auth": "none",
+     "env": "", "model": "qwen3.5:latest", "signup": "https://ollama.com",
+     "limit": "Local — free, hardware-bound"},
+]
+
+
+def _config_path() -> Path:
+    return hermes_home() / "config.yaml"
+
+
+def _read_config() -> Dict[str, Any]:
+    try:
+        import yaml
+        return yaml.safe_load(open(_config_path())) or {}
+    except Exception:
+        return {}
+
+
+def _write_config(cfg: Dict[str, Any]) -> None:
+    import yaml
+    f = _config_path()
+    tmp = f.with_suffix(".yaml.tmp")
+    with open(tmp, "w") as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False)
+    tmp.replace(f)
+
+
+def _oauth_authed(provider: str) -> bool:
+    """Best-effort: is an oauth provider logged in? Check the Hermes auth store."""
+    try:
+        data = json.loads((hermes_home() / "auth.json").read_text(encoding="utf-8"))
+        blob = json.dumps(data)
+        return provider in blob or provider.replace("-", "_") in blob
+    except Exception:
+        return False
+
+
+def _chain_positions() -> Dict[str, str]:
+    """Map provider -> 'primary' | 'fallback #N' from config."""
+    cfg = _read_config()
+    out: Dict[str, str] = {}
+    m = cfg.get("model") or {}
+    if isinstance(m, dict) and m.get("provider"):
+        out[str(m["provider"])] = "primary"
+    for i, f in enumerate(cfg.get("fallback_providers") or [], start=1):
+        if f.get("provider") and str(f["provider"]) not in out:
+            out[str(f["provider"])] = f"fallback #{i}"
+    return out
+
+
+@router.get("/providers/scan")
+async def providers_scan():
+    """Every free/cheap model backend: tier, get-key link, auth status, chain
+    position, and cooldown (when an exhausted one is callable again)."""
+    env_file = _read_env_file()
+    positions = _chain_positions()
+    cooldowns = read_state().get("cooldowns", {})
+    now = time.time()
+    rows: List[Dict[str, Any]] = []
+    for p in PROVIDERS_CATALOG:
+        auth = p["auth"]
+        if auth == "api_key":
+            authed = _key_present(p["env"], env_file) if p.get("env") else False
+        elif auth == "oauth":
+            authed = _oauth_authed(p["id"])
+        elif auth == "none":
+            authed = True
+        else:
+            authed = False
+        cd = cooldowns.get(p["id"])
+        cooling = bool(cd and cd.get("until", 0) > now)
+        rows.append({
+            **{k: p[k] for k in ("id", "name", "tier", "auth", "env", "model", "signup", "limit")},
+            "authed": authed,
+            "position": positions.get(p["id"]),  # primary / fallback #N / None
+            "cooling_down": cooling,
+            "cooldown_until": cd.get("until") if cd else None,
+            "cooldown_reason": cd.get("reason") if cd else None,
+            "cooldown_remaining_s": int(cd["until"] - now) if cooling else 0,
+        })
+    # sort: free first, then trial, cheap, subscription, local
+    order = {"free": 0, "trial": 1, "cheap": 2, "subscription": 3, "local": 4}
+    rows.sort(key=lambda r: (order.get(r["tier"], 9), r["name"]))
+    return {"providers": rows, "scanned_at": int(now)}
+
+
+class ChainEntry(BaseModel):
+    provider: str
+    model: str
+    base_url: Optional[str] = None
+
+
+class ChainBody(BaseModel):
+    fallback: List[ChainEntry]
+
+
+@router.get("/providers/chain")
+async def get_chain():
+    cfg = _read_config()
+    return {"primary": cfg.get("model"), "fallback": cfg.get("fallback_providers") or []}
+
+
+@router.post("/providers/chain")
+async def set_chain(body: ChainBody):
+    """Replace the fallback chain (primary is set separately via `hermes model`)."""
+    cfg = _read_config()
+    chain = []
+    for e in body.fallback:
+        entry = {"provider": e.provider, "model": e.model}
+        if e.base_url:
+            entry["base_url"] = e.base_url
+        elif e.provider in ("custom", "ollama"):
+            entry["base_url"] = "http://localhost:11434/v1"
+        chain.append(entry)
+    cfg["fallback_providers"] = chain
+    _write_config(cfg)
+    return {"ok": True, "fallback": chain}
+
+
+class CooldownBody(BaseModel):
+    provider: str
+    seconds: int
+    reason: Optional[str] = ""
+
+
+@router.post("/providers/cooldown")
+async def set_cooldown(body: CooldownBody):
+    """Record that a provider is exhausted until now+seconds (e.g. a 429
+    retry-after). The governor uses this to skip + auto-restore it."""
+    st = read_state()
+    st.setdefault("cooldowns", {})[body.provider] = {
+        "until": time.time() + max(0, int(body.seconds)),
+        "reason": body.reason or "rate limit",
+        "set_at": time.time(),
+    }
+    write_state(st)
+    return {"ok": True, "provider": body.provider, "until": st["cooldowns"][body.provider]["until"]}
+
+
+@router.post("/providers/cooldown/clear")
+async def clear_cooldown(body: CooldownBody):
+    st = read_state()
+    if body.provider in st.get("cooldowns", {}):
+        del st["cooldowns"][body.provider]
+        write_state(st)
+    return {"ok": True, "provider": body.provider}
