@@ -382,6 +382,23 @@ def _cmd_routes(raw_args: str = "") -> str:
     return "Routing rules:\n" + "\n".join(f"  {r['intent']} → {r['cli']}" for r in rules)
 
 
+def _cmd_delegate(raw_args: str = "") -> str:
+    """Deterministically run a task on a local worker CLI (caps + fallback +
+    usage tracking) — no reliance on a model emitting a tool call."""
+    task = (raw_args or "").strip()
+    if not task:
+        return ("Usage: /cli-delegate <task>\n"
+                "Routes the task to a local CLI (routing rules + priority), skips "
+                "any over its cap, falls back on rate-limit, and records usage.")
+    res = json.loads(_cli_delegate({"task": task}))
+    if res.get("ok"):
+        fb = res.get("fell_back_from") or []
+        head = f"[{res['cli']}]" + (f" (fell back from: {', '.join(fb)})" if fb else "")
+        return head + "\n" + (res.get("output") or "")
+    return ("Delegation failed: " + str(res.get("error"))
+            + (("\ntried: " + "; ".join(res.get("tried", []))) if res.get("tried") else ""))
+
+
 def _cmd_usage(raw_args: str = "") -> str:
     state = _read_state()
     mu = state.get("model_usage", {})
@@ -471,6 +488,7 @@ def _cmd_help(raw_args: str = "") -> str:
         "  /cli-install <cli> [manager]      install a CLI\n"
         "  /cli-media                        media backend status\n"
         "  /cli-usage                        provider / model usage (turns)\n"
+        "  /cli-delegate <task>              run a task on a local worker CLI\n"
         "  /cli-help                         this help\n"
         "(Also works as /cli <subcommand>.)"
     )
@@ -480,7 +498,8 @@ def _cmd_help(raw_args: str = "") -> str:
 _SUBCMDS = {
     "status": _cmd_status, "scan": _cmd_scan, "limit": _cmd_limit,
     "route": _cmd_route, "routes": _cmd_routes, "install": _cmd_install,
-    "media": _cmd_media, "usage": _cmd_usage, "help": _cmd_help,
+    "media": _cmd_media, "usage": _cmd_usage, "delegate": _cmd_delegate,
+    "help": _cmd_help,
 }
 
 # (name, handler, description) for the cli-* family + the `cli` dispatcher.
@@ -493,6 +512,7 @@ _CLI_COMMANDS = [
     ("cli-install", _cmd_install, "Install a CLI: <cli> [manager]"),
     ("cli-media", _cmd_media, "Media backend status"),
     ("cli-usage", _cmd_usage, "Provider / model usage (turns)"),
+    ("cli-delegate", _cmd_delegate, "Run a task on a local worker CLI (caps + fallback)"),
     ("cli-help", _cmd_help, "List CLI Orchestrator commands"),
 ]
 
