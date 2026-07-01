@@ -6,6 +6,7 @@ description: >-
   (see dashboard/) plus a post_tool_call hook that tallies how often the agent
   drives each local worker CLI, and a /cli slash command for a quick status read.
 provides_tools:
+  - cli_delegate
   - generate_music
 provides_hooks:
   - post_tool_call

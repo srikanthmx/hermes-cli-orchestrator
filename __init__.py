@@ -54,6 +54,22 @@ DELEGATION_HINTS = {
 CODING_PRIORITY = ("codex", "claude", "qwen", "opencode", "crush", "amp",
                    "cursor-agent", "goose", "aider", "gemini", "copilot")
 
+# Non-interactive one-shot invocation per CLI, as argv lists (no shell → no
+# injection). The task is passed as a single argument. Only CLIs with a clean
+# headless mode are delegation targets.
+DELEGATE_ARGV = {
+    "codex": lambda task: ["codex", "exec", "--skip-git-repo-check", task],
+    "claude": lambda task: ["claude", "-p", task],
+    "gemini": lambda task: ["gemini", "-p", task],
+    "qwen": lambda task: ["qwen", "-p", task],
+    "opencode": lambda task: ["opencode", "run", task],
+}
+# Substrings that indicate a CLI hit a rate/quota limit → fall back to the next.
+RATE_LIMIT_PATTERNS = (
+    "rate limit", "rate-limit", "429", "too many requests", "quota",
+    "limit reached", "usage limit", "exhausted", "insufficient", "try again later",
+)
+
 # Binaries we count. Mirrors dashboard/plugin_api.py DEFAULT_CATALOG ids/bins.
 TRACKED_BINS = {
     "claude": "claude",
@@ -214,26 +230,19 @@ def _on_pre_llm_call(session_id=None, user_message=None, model=None,
         lines = [
             "[CLI Orchestrator — routing policy]",
             "You are a local orchestrator on a small free model. Do NOT attempt "
-            "high-intensity work yourself — DELEGATE it to a capable local CLI by "
-            "actually CALLING the `terminal` tool (emit a real tool call; do NOT "
-            "just print the command in a code block). After it returns, summarize "
-            "or verify the result:",
+            "high-intensity work yourself. For code generation, refactors, "
+            "multi-file edits, or debugging, CALL the `cli_delegate` tool with a "
+            "`task` (and optional `kind`) — it routes to the best available CLI, "
+            "respects daily caps, and falls back automatically if one is "
+            "rate-limited. Then summarize or verify what it returns.",
         ]
-        # Explicit orchestration-matrix rules take precedence.
-        rules = [r for r in (state.get("routing") or [])
-                 if r.get("cli") in capable]
-        seen_intents = set()
+        # Mention explicit intent→CLI rules so the model passes a good `kind`.
+        rules = [r for r in (state.get("routing") or []) if r.get("cli") in capable]
         for r in rules:
-            cli = r["cli"]
-            seen_intents.add(r.get("intent", "").lower())
-            lines.append(f"- {r.get('intent')}: delegate to `{cli}` — "
-                        f"{DELEGATION_HINTS.get(cli, 'via the terminal tool')}.")
-        # Default code-gen rule if the matrix didn't cover it.
-        if not any("cod" in i or "gen" in i or "dev" in i for i in seen_intents):
-            top = capable[0]
-            lines.append(f"- Code generation / refactors / multi-file edits / "
-                        f"debugging: delegate to `{top}` — {DELEGATION_HINTS.get(top)}.")
+            lines.append(f"- {r.get('intent')} → prefers `{r['cli']}` "
+                        f"(pass kind='{r.get('intent')}').")
         lines.append("- Image generation: use the image_generation tool.")
+        lines.append("- Music generation: use the generate_music tool.")
         lines.append("- Simple questions, planning, summaries: answer directly "
                     "(no delegation).")
         lines.append(f"Capable CLIs available now (priority order): "
@@ -499,6 +508,84 @@ def _cmd_dispatch(raw_args: str = "") -> str:
     return fn(parts[1] if len(parts) > 1 else "")
 
 
+# ── cli_delegate governor tool ──────────────────────────────────────────────
+# The one thing Hermes doesn't do: delegate a task to a worker CLI with HARD
+# cap enforcement (skip CLIs over their daily cap) + automatic fallback to the
+# next CLI when one is rate-limited. Records usage itself (it bypasses the
+# terminal tool, so the post_tool_call counter wouldn't otherwise see it).
+DELEGATE_SCHEMA = {
+    "name": "cli_delegate",
+    "description": (
+        "Delegate a heavy / high-intensity task (code generation, refactor, "
+        "multi-file work, debugging) to a local worker CLI (Codex, Claude Code, "
+        "Gemini, Qwen, OpenCode). Automatically picks the best available CLI by "
+        "your routing rules + priority, SKIPS any that are over their daily cap, "
+        "and FALLS BACK to the next CLI if one is rate-limited. Returns the CLI's "
+        "output. Prefer this over running a CLI yourself via the terminal tool."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "The full task/prompt to hand to the CLI"},
+            "kind": {"type": "string", "description": "Optional intent to route by (e.g. 'code generation')"},
+        },
+        "required": ["task"],
+    },
+}
+
+
+def _delegate_candidates(kind: str, state: dict) -> list:
+    """Ordered, filtered list of CLIs to try: routing rule for `kind` first,
+    then priority order; only installed + delegation-capable ones."""
+    ordered: list = []
+    if kind:
+        for r in state.get("routing", []):
+            cli = r.get("cli")
+            if cli and kind.lower() in (r.get("intent", "").lower()) and cli not in ordered:
+                ordered.append(cli)
+    for c in CODING_PRIORITY:
+        if c not in ordered:
+            ordered.append(c)
+    return [c for c in ordered
+            if c in DELEGATE_ARGV and shutil.which(TRACKED_BINS.get(c, c))]
+
+
+def _cli_delegate(args: dict, **kwargs) -> str:
+    """Tool handler — always returns a JSON string, never raises."""
+    import subprocess
+    task = (args.get("task") or "").strip() if isinstance(args, dict) else ""
+    kind = (args.get("kind") or "").strip() if isinstance(args, dict) else ""
+    if not task:
+        return json.dumps({"error": "task is required"})
+    state = _read_state()
+    candidates = _delegate_candidates(kind, state)
+    if not candidates:
+        return json.dumps({"error": "no delegation-capable CLI installed",
+                           "hint": "install one of: " + ", ".join(DELEGATE_ARGV)})
+    tried = []
+    for cli in candidates:
+        if _over_cap(cli, state):
+            tried.append(f"{cli}: over daily cap — skipped")
+            continue
+        try:
+            proc = subprocess.run(DELEGATE_ARGV[cli](task), capture_output=True,
+                                  text=True, timeout=240)
+        except Exception as exc:
+            tried.append(f"{cli}: error ({exc})")
+            continue
+        combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+        rate_limited = any(p in combined for p in RATE_LIMIT_PATTERNS)
+        if proc.returncode != 0 or rate_limited:
+            tried.append(f"{cli}: {'rate-limited' if rate_limited else 'failed (rc=%d)' % proc.returncode} — falling back")
+            continue
+        _record_usage(cli)  # count this real invocation
+        return json.dumps({"ok": True, "cli": cli,
+                           "output": (proc.stdout or "").strip()[:6000],
+                           "fell_back_from": tried})
+    return json.dumps({"error": "all candidate CLIs are over cap or rate-limited",
+                       "tried": tried, "candidates": candidates})
+
+
 # ── Music generation tool (Hermes has no native music framework) ────────────
 # Provides a `generate_music` tool backed by Replicate MusicGen. Requires
 # REPLICATE_API_TOKEN (managed via the Media panel). ⚠️ UNVERIFIED: written
@@ -598,12 +685,12 @@ def register(ctx):
     except Exception as exc:
         # register_command is newer; tolerate older Hermes that lack it.
         logger.debug("cli-orchestrator: slash commands not registered: %s", exc)
-    try:
-        ctx.register_tool(
-            name="generate_music",
-            toolset="cli-orchestrator",
-            schema=MUSIC_SCHEMA,
-            handler=_generate_music,
-        )
-    except Exception as exc:
-        logger.debug("cli-orchestrator: generate_music tool not registered: %s", exc)
+    for _tname, _tschema, _thandler in [
+        ("cli_delegate", DELEGATE_SCHEMA, _cli_delegate),
+        ("generate_music", MUSIC_SCHEMA, _generate_music),
+    ]:
+        try:
+            ctx.register_tool(name=_tname, toolset="cli-orchestrator",
+                              schema=_tschema, handler=_thandler)
+        except Exception as exc:
+            logger.debug("cli-orchestrator: tool %s not registered: %s", _tname, exc)
