@@ -126,41 +126,66 @@
     }, busy ? "…" : (isVerified ? "verified ✓" : "mark verified"));
   }
 
-  // A CLI or model can serve any text-oriented category, not just coding.
-  var TEXT_CATS = ["coding", "chat", "research", "docs", "automation", "other"];
+  // Categories a backend can be enabled to serve (toggleable per backend).
+  // "other" is an always-available catch-all, not a toggle.
+  var CAP_CATS = ["coding", "chat", "image", "audio", "video", "research", "docs", "automation"];
+  var DEFAULT_TEXT_CAPS = ["coding", "chat", "research", "docs", "automation"];
+  // Per-backend seed overrides (what it plausibly supports out of the box).
+  var CAPS_BY_ID = {
+    gh: ["coding", "automation"],
+    glab: ["coding", "automation"],
+    ollama: ["coding", "chat", "research", "docs", "automation"],
+  };
 
-  function buildTargets(clis, providers, media) {
+  function defaultCapsFor(row) {
+    if (row.type === "media") {
+      if (row.category === "Image") return ["image"];
+      if (row.category === "Video") return ["video"];
+      if (row.category === "Voice / TTS" || row.category === "Speech-to-Text" || row.category === "Music") return ["audio"];
+      return [];
+    }
+    if (row.type === "cli" && CAPS_BY_ID[row.id]) return CAPS_BY_ID[row.id].slice();
+    return DEFAULT_TEXT_CAPS.slice();
+  }
+
+  // capsEnabled: { "cli:codex": ["coding","image",...] } from /capabilities.
+  // A backend's routing eligibility = its enabled categories (defaults until
+  // the user customises it in the Backends tab).
+  function buildTargets(clis, providers, media, capsEnabled) {
+    capsEnabled = capsEnabled || {};
     var rows = [];
+    function finalize(row) {
+      var dflt = defaultCapsFor(row);
+      var tid = row.type + ":" + row.id;
+      var enabled = capsEnabled[tid] !== undefined ? capsEnabled[tid] : dflt;
+      row.defaultCaps = dflt;
+      row.enabledCaps = enabled;
+      row.useCases = enabled.concat(["other"]);
+      return row;
+    }
     (clis || []).forEach(function (c) {
-      rows.push(Object.assign({}, c, {
+      rows.push(finalize(Object.assign({}, c, {
         type: "cli",
         isLocal: c.id === "ollama" || c.category === "Local Models",
         isDeprecated: !!c.deprecated,
-        useCases: TEXT_CATS.slice(),
         routeMode: "cli",
-      }));
+      })));
     });
     (providers || []).forEach(function (p) {
-      rows.push(Object.assign({}, p, {
+      rows.push(finalize(Object.assign({}, p, {
         type: "provider",
         isLocal: p.id === "custom" || p.tier === "local",
         isDeprecated: false,
-        useCases: TEXT_CATS.slice(),
         routeMode: "model",
-      }));
+      })));
     });
     (media || []).forEach(function (m) {
-      var uc = ["other"];
-      if (m.category === "Image") uc = ["image", "other"];
-      else if (m.category === "Video") uc = ["video", "other"];
-      else if (m.category === "Voice / TTS" || m.category === "Speech-to-Text" || m.category === "Music") uc = ["audio", "other"];
-      rows.push(Object.assign({}, m, {
+      rows.push(finalize(Object.assign({}, m, {
         type: "media",
         isLocal: false,
         isDeprecated: false,
-        useCases: uc,
         routeMode: "media",
-      }));
+      })));
     });
     rows.sort(function (a, b) {
       if (!!a.isLocal !== !!b.isLocal) return a.isLocal ? 1 : -1;
@@ -171,6 +196,37 @@
       return targetName(a).localeCompare(targetName(b));
     });
     return rows;
+  }
+
+  // Toggle chips: which categories a backend serves. Enabled → eligible in
+  // that category's routing tab. Persisted via /capabilities.
+  function ServesToggles(props) {
+    var row = props.row;
+    var busySt = useState(false); var busy = busySt[0], setBusy = busySt[1];
+    var enabled = row.enabledCaps || [];
+    function toggle(cat) {
+      var next = enabled.indexOf(cat) >= 0
+        ? enabled.filter(function (c) { return c !== cat; })
+        : enabled.concat([cat]);
+      setBusy(true);
+      postJSON("/capabilities", { id: targetId(row), enabled: next })
+        .then(function () { if (props.onChanged) props.onChanged(); })
+        .catch(function () {})
+        .finally(function () { setBusy(false); });
+    }
+    return h("div", { className: "flex flex-wrap gap-1" }, CAP_CATS.map(function (cat) {
+      var on = enabled.indexOf(cat) >= 0;
+      return h("button", {
+        key: cat,
+        onClick: function () { toggle(cat); },
+        disabled: busy,
+        title: (on ? "Enabled" : "Disabled") + " for " + (USE_CASE_NAMES[cat] || cat) + " — click to toggle",
+        className: cn("border px-1.5 py-0.5 text-[10px] font-courier disabled:opacity-40",
+          on
+            ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200"
+            : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
+      }, USE_CASE_NAMES[cat] || cat);
+    }));
   }
 
   function KeyInput(props) {
@@ -518,10 +574,10 @@
                 h("td", { className: "py-3 pr-3" }, statusFor(row)),
                 h("td", { className: "py-3 pr-3" },
                   isMedia
-                    ? h("span", { className: "text-[11px] text-muted-foreground" }, row.category || "media")
-                    : h("div", { className: "flex flex-wrap gap-1" }, (row.useCases || []).filter(function (u) { return u !== "other"; }).map(function (u) {
-                        return h("span", { key: u, className: "border border-border bg-background/40 px-1.5 py-0.5 text-[10px] font-courier text-muted-foreground" }, USE_CASE_NAMES[u] || u);
-                      }))),
+                    ? h("div", { className: "flex flex-wrap gap-1" }, (row.enabledCaps || []).map(function (u) {
+                        return h("span", { key: u, className: "border border-emerald-500/50 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-courier text-emerald-200" }, USE_CASE_NAMES[u] || u);
+                      }))
+                    : h(ServesToggles, { row: row, onChanged: props.onChanged })),
                 h("td", { className: "max-w-[240px] py-3 pr-3 text-xs text-muted-foreground" },
                   row.plan || row.limit || row.mechanism || row.category || ""),
                 h("td", { className: "py-3 pr-3" },
@@ -681,6 +737,7 @@
     var healthSt = useState(null); var health = healthSt[0], setHealth = healthSt[1];
     var useCasesSt = useState([]); var useCases = useCasesSt[0], setUseCases = useCasesSt[1];
     var routesSt = useState([]); var routes = routesSt[0], setRoutes = routesSt[1];
+    var capsSt = useState({}); var capsEnabled = capsSt[0], setCapsEnabled = capsSt[1];
     var customLocalSt = useState(false); var customLocal = customLocalSt[0], setCustomLocal = customLocalSt[1];
     var activeSt = useState("coding"); var active = activeSt[0], setActive = activeSt[1];
     var viewSt = useState("backends"); var view = viewSt[0], setView = viewSt[1];
@@ -695,6 +752,7 @@
         getJSON("/providers/scan"),
         getJSON("/health"),
         getJSON("/use-cases"),
+        getJSON("/capabilities"),
       ]).then(function (res) {
         setClis((res[0] && res[0].clis) || []);
         setMedia((res[1] && res[1].media) || []);
@@ -703,6 +761,7 @@
         setUseCases((res[4] && res[4].use_cases) || []);
         setRoutes((res[4] && res[4].routes) || []);
         setCustomLocal(!!(res[4] && res[4].show_custom_local));
+        setCapsEnabled((res[5] && res[5].capabilities) || {});
       }).catch(function (e) {
         setErr(String(e));
       }).finally(function () {
@@ -712,7 +771,7 @@
 
     useEffect(function () { load(); }, [load]);
 
-    var targets = buildTargets(clis, providers, media);
+    var targets = buildTargets(clis, providers, media, capsEnabled);
     var selected = (useCases.filter(function (u) { return u.id === active; })[0]) || {};
     var readyClis = clis.filter(function (c) { return c.installed; }).length;
     var readyProviders = providers.filter(function (p) { return p.authed; }).length;

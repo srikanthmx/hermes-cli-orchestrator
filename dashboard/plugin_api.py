@@ -766,6 +766,37 @@ async def verify_mark(body: VerifyBody):
     return {"ok": True, "verified": state["verified"]}
 
 
+# Categories a backend may be enabled to serve (mirrors the UI use-case tabs,
+# minus the "other" catch-all which is always available).
+CAPABILITY_CATEGORIES = [
+    "coding", "chat", "image", "audio", "video", "research", "docs", "automation",
+]
+
+
+class CapabilitiesBody(BaseModel):
+    id: str                    # target key, e.g. "cli:codex"
+    enabled: List[str] = []    # categories this backend is enabled to serve
+
+
+@router.get("/capabilities")
+async def get_capabilities():
+    """Per-backend enabled categories, keyed by target id. Absent id → the UI
+    falls back to that backend's sensible defaults."""
+    return {"capabilities": read_state().get("capabilities", {})}
+
+
+@router.post("/capabilities")
+async def set_capabilities(body: CapabilitiesBody):
+    """Set which categories a backend serves. Only enabled categories make it
+    eligible in that category's routing tab."""
+    state = read_state()
+    key = body.id.strip()
+    valid = [c for c in body.enabled if c in CAPABILITY_CATEGORIES]
+    state.setdefault("capabilities", {})[key] = valid
+    write_state(state)
+    return {"ok": True, "capabilities": state["capabilities"][key]}
+
+
 class RoutingRule(BaseModel):
     intent: str
     cli: str
