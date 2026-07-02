@@ -173,6 +173,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "install": {"npm": "npm install -g opencode-ai", "brew": "brew install sst/tap/opencode"},
         "provider": "opencode-zen", "plan": "BYO key / free models",
         "docs": "https://github.com/sst/opencode",
+        "verified": True,  # confirmed working as a governed worker (opencode run)
     },
     {
         "id": "cursor-agent", "name": "Cursor CLI", "category": "AI Coding",
