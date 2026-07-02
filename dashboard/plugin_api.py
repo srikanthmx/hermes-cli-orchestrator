@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import subprocess
 import time
@@ -39,6 +40,19 @@ from pydantic import BaseModel
 router = APIRouter()
 
 PLUGIN_ID = "cli-orchestrator"
+
+PROVIDER_KEY_ENV: Dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "copilot": "GITHUB_TOKEN",
+    "openrouter": "OPENROUTER_API_KEY",
+    "huggingface": "HF_TOKEN",
+    "zai": "GLM_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "custom": "",
+    "openai-codex": "",
+    "qwen-oauth": "",
+}
 
 # ---------------------------------------------------------------------------
 # Paths — mutable state lives under HERMES_HOME, never inside the plugin repo,
@@ -86,6 +100,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "id": "claude", "name": "Claude Code", "category": "AI Coding",
         "bin": "claude", "version_args": ["--version"],
         "auth": {"file": "~/.claude/.credentials.json"},
+        "auth_command": "claude login",
+        "auth_hint": "Run Claude Code login once; subscription auth is stored under ~/.claude.",
         "install": {"npm": "npm install -g @anthropic-ai/claude-code"},
         "provider": "anthropic", "plan": "Subscription (Claude Pro/Max)",
         "docs": "https://docs.claude.com/en/docs/claude-code",
@@ -94,21 +110,48 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "id": "codex", "name": "OpenAI Codex CLI", "category": "AI Coding",
         "bin": "codex", "version_args": ["--version"],
         "auth": {"file": "~/.codex/auth.json"},
+        "auth_command": "codex login",
+        "auth_hint": "Run Codex login once; ChatGPT subscription auth is stored under ~/.codex.",
         "install": {"npm": "npm install -g @openai/codex", "brew": "brew install codex"},
         "provider": "openai-codex", "plan": "Subscription (ChatGPT Plus/Pro)",
         "docs": "https://github.com/openai/codex",
     },
     {
-        "id": "gemini", "name": "Gemini CLI", "category": "AI Coding",
+        "id": "antigravity", "name": "Antigravity CLI", "category": "AI Coding",
+        "bin": "antigravity", "version_args": ["--version"], "auth": None,
+        "auth_command": "antigravity",
+        "auth_hint": "Run Antigravity once after install and complete Google's interactive sign-in when prompted.",
+        "install": {
+            "script": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+            "windows-powershell": "irm https://antigravity.google/cli/install.ps1 | iex",
+            "windows-cmd": "curl -fsSL https://antigravity.google/cli/install.cmd -o install.cmd && install.cmd && del install.cmd",
+        },
+        "install_meta": {
+            "script": {"label": "macOS / Linux", "platforms": ["mac", "linux"]},
+            "windows-powershell": {"label": "Windows PowerShell", "platforms": ["windows"]},
+            "windows-cmd": {"label": "Windows CMD", "platforms": ["windows"]},
+        },
+        "install_hint": "Official Antigravity docs also include Linux apt/dnf repository install steps.",
+        "provider": "gemini", "plan": "Google Antigravity",
+        "docs": "https://antigravity.google/docs/cli/install",
+    },
+    {
+        "id": "gemini", "name": "Gemini CLI (legacy)", "category": "AI Coding",
         "bin": "gemini", "version_args": ["--version"],
         "auth": {"file": "~/.gemini/oauth_creds.json"},
+        "auth_command": "gemini",
+        "auth_hint": "Consumer/free and Google AI Pro/Ultra Gemini CLI requests stop on June 18, 2026. Keep only for Enterprise/API-key access; use Antigravity CLI otherwise.",
         "install": {"npm": "npm install -g @google/gemini-cli"},
-        "provider": "gemini", "plan": "Free tier + API key (Google)",
-        "docs": "https://github.com/google-gemini/gemini-cli",
+        "provider": "gemini", "plan": "Legacy / Enterprise or API key",
+        "hide_when_missing": True,
+        "deprecated": True,
+        "docs": "https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/",
     },
     {
         "id": "qwen", "name": "Qwen Code", "category": "AI Coding",
         "bin": "qwen", "version_args": ["--version"], "auth": None,
+        "auth_command": "qwen",
+        "auth_hint": "Start Qwen Code and complete its OAuth/login flow if it prompts.",
         "install": {"npm": "npm install -g @qwen-code/qwen-code"},
         "provider": "qwen-oauth", "plan": "Free OAuth (Qwen, ~2k req/day)",
         "docs": "https://github.com/QwenLM/qwen-code",
@@ -116,6 +159,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "copilot", "name": "GitHub Copilot CLI", "category": "AI Coding",
         "bin": "copilot", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Requires GitHub/Copilot authentication. Use GitHub auth if the CLI prompts.",
         "install": {"npm": "npm install -g @github/copilot"},
         "provider": "copilot", "plan": "Subscription (GitHub Copilot)",
         "docs": "https://github.com/github/copilot-cli",
@@ -123,6 +167,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "opencode", "name": "OpenCode", "category": "AI Coding",
         "bin": "opencode", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Configure provider credentials used by OpenCode before routing work here.",
         "install": {"npm": "npm install -g opencode-ai", "brew": "brew install sst/tap/opencode"},
         "provider": "opencode-zen", "plan": "BYO key / free models",
         "docs": "https://github.com/sst/opencode",
@@ -130,6 +175,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "cursor-agent", "name": "Cursor CLI", "category": "AI Coding",
         "bin": "cursor-agent", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Run Cursor CLI once and complete the account sign-in flow if prompted.",
         "install": {"script": "curl https://cursor.com/install -fsS | bash"},
         "provider": None, "plan": "Subscription (Cursor)",
         "docs": "https://docs.cursor.com/en/cli/overview",
@@ -137,6 +183,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "amp", "name": "Amp (Sourcegraph)", "category": "AI Coding",
         "bin": "amp", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Run Amp once and complete Sourcegraph authentication if prompted.",
         "install": {"npm": "npm install -g @sourcegraph/amp"},
         "provider": None, "plan": "Free credits (Sourcegraph)",
         "docs": "https://ampcode.com",
@@ -144,6 +191,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "crush", "name": "Crush (Charm)", "category": "AI Coding",
         "bin": "crush", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Configure a model provider key before routing work here.",
         "install": {"npm": "npm install -g @charmland/crush",
                     "brew": "brew install charmbracelet/tap/crush"},
         "provider": None, "plan": "BYO key (multi-provider)",
@@ -152,6 +200,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "goose", "name": "Goose (Block)", "category": "AI Coding",
         "bin": "goose", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Configure Goose/provider credentials before routing work here.",
         "install": {"script": "curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | bash"},
         "provider": None, "plan": "BYO key (Block)",
         "docs": "https://block.github.io/goose/",
@@ -159,6 +208,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "aider", "name": "Aider", "category": "AI Coding",
         "bin": "aider", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Configure Aider's provider key before routing work here.",
         "install": {"brew": "brew install aider", "pipx": "pipx install aider-chat"},
         "provider": None, "plan": "BYO key",
         "docs": "https://aider.chat",
@@ -167,6 +217,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "mods", "name": "Mods (Charm)", "category": "AI Tools",
         "bin": "mods", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Configure Mods with the provider key it should use.",
         "install": {"brew": "brew install charmbracelet/tap/mods",
                     "go": "go install github.com/charmbracelet/mods@latest"},
         "provider": None, "plan": "BYO key",
@@ -175,6 +226,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "llm", "name": "llm (Datasette)", "category": "AI Tools",
         "bin": "llm", "version_args": ["--version"], "auth": None,
+        "auth_hint": "Configure llm keys with its native key store or add provider env keys here.",
         "install": {"pipx": "pipx install llm", "brew": "brew install llm",
                     "uv": "uv tool install llm"},
         "provider": None, "plan": "BYO key (plugin ecosystem)",
@@ -185,6 +237,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "id": "gh", "name": "GitHub CLI", "category": "Version Control",
         "bin": "gh", "version_args": ["--version"],
         "auth": {"cmd": ["gh", "auth", "status"]},
+        "auth_command": "gh auth login",
+        "auth_hint": "Run GitHub auth login after installation.",
         "install": {"brew": "brew install gh"},
         "provider": None, "plan": "Free (GitHub account)",
         "docs": "https://cli.github.com",
@@ -193,6 +247,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "id": "glab", "name": "GitLab CLI", "category": "Version Control",
         "bin": "glab", "version_args": ["--version"],
         "auth": {"cmd": ["glab", "auth", "status"]},
+        "auth_command": "glab auth login",
+        "auth_hint": "Run GitLab auth login after installation.",
         "install": {"brew": "brew install glab"},
         "provider": None, "plan": "Free (GitLab account)",
         "docs": "https://gitlab.com/gitlab-org/cli",
@@ -203,6 +259,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "bin": "ollama", "version_args": ["--version"], "auth": None,
         "install": {"brew": "brew install ollama"},
         "provider": "custom", "plan": "Local / free (offline floor)",
+        "hide_when_missing": True,
         "docs": "https://ollama.com",
     },
     # ── Agent host ────────────────────────────────────────────────────────────
@@ -217,7 +274,35 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
 
 # Delegation-capable worker CLIs, in fallback priority order (mirrors
 # __init__.py DELEGATE_ARGV + CODING_PRIORITY). Used to mark "workers" in scan.
-_DELEGATE_PRIORITY = ["codex", "claude", "qwen", "opencode", "gemini"]
+_DELEGATE_PRIORITY = ["codex", "claude", "qwen", "opencode"]
+
+# Non-interactive argv for each worker CLI (mirrors __init__.py DELEGATE_ARGV).
+# Used by /install/assist to answer install questions through a governed worker
+# instead of a paid API — the same CLIs this plugin already orchestrates.
+_ASSIST_ARGV = {
+    "codex": lambda p: ["codex", "exec", "--skip-git-repo-check", p],
+    "claude": lambda p: ["claude", "-p", p],
+    "qwen": lambda p: ["qwen", "-p", p],
+    "opencode": lambda p: ["opencode", "run", p],
+}
+
+# Per-package-manager prerequisite so the UI can show "Step 1: install X first".
+_MANAGER_PREREQ = {
+    "npm": {"label": "Node.js + npm", "check": "node --version", "bin": "npm",
+            "get": "https://nodejs.org"},
+    "brew": {"label": "Homebrew", "check": "brew --version", "bin": "brew",
+             "get": "https://brew.sh"},
+    "pipx": {"label": "pipx", "check": "pipx --version", "bin": "pipx",
+             "get": "https://pipx.pypa.io"},
+    "uv": {"label": "uv", "check": "uv --version", "bin": "uv",
+           "get": "https://docs.astral.sh/uv/"},
+    "go": {"label": "Go toolchain", "check": "go version", "bin": "go",
+           "get": "https://go.dev/dl/"},
+    "script": {"label": "curl + bash", "check": "curl --version", "bin": "curl",
+               "get": ""},
+    "windows-powershell": {"label": "PowerShell", "check": "", "bin": "", "get": ""},
+    "windows-cmd": {"label": "Windows cmd", "check": "", "bin": "", "get": ""},
+}
 
 
 def load_catalog() -> List[Dict[str, Any]]:
@@ -239,7 +324,79 @@ def load_catalog() -> List[Dict[str, Any]]:
 # State (limits / routing / usage) — small JSON, read-modify-write.
 # ---------------------------------------------------------------------------
 
-_DEFAULT_STATE: Dict[str, Any] = {"limits": {}, "routing": [], "usage": {}}
+USE_CASES: List[Dict[str, Any]] = [
+    {
+        "id": "coding",
+        "name": "Coding",
+        "intent": "code generation, refactor, debugging, tests, multi-file edits",
+        "default_mode": "cli",
+        "description": "Delegate heavy software work to local coding CLIs with cap-aware fallback.",
+    },
+    {
+        "id": "chat",
+        "name": "Chat",
+        "intent": "general chat, summaries, reasoning, planning, answers",
+        "default_mode": "model",
+        "description": "Use the active model chain for normal assistant turns.",
+    },
+    {
+        "id": "image",
+        "name": "Image",
+        "intent": "generate image, draw, create picture, text to image, image edit",
+        "default_mode": "media",
+        "description": "Route image requests to configured image backends instead of the default chat model.",
+    },
+    {
+        "id": "audio",
+        "name": "Audio",
+        "intent": "voice, transcription, text to speech, speech to text, music, audio generation",
+        "default_mode": "media",
+        "description": "Route speech, voice, transcription, and music requests to audio-capable backends.",
+    },
+    {
+        "id": "video",
+        "name": "Video",
+        "intent": "generate video, animate image, text to video, image to video",
+        "default_mode": "media",
+        "description": "Route video generation and animation requests to configured video backends.",
+    },
+    {
+        "id": "research",
+        "name": "Research",
+        "intent": "web research, compare options, gather sources, summarize findings",
+        "default_mode": "model",
+        "description": "Use model providers or research-capable CLIs for source-heavy work.",
+    },
+    {
+        "id": "docs",
+        "name": "Docs",
+        "intent": "write docs, summarize files, draft reports, edit documents",
+        "default_mode": "model",
+        "description": "Prefer model providers for writing, summarizing, and document-style tasks.",
+    },
+    {
+        "id": "automation",
+        "name": "Automation",
+        "intent": "long running, batch, monitor, scheduled, autonomous, workflow",
+        "default_mode": "cli",
+        "description": "Use CLI workers for durable multi-step or background-style tasks.",
+    },
+    {
+        "id": "other",
+        "name": "Other",
+        "intent": "anything else, custom tasks, etc",
+        "default_mode": "model",
+        "description": "Catch-all route for custom use cases not covered by the named groups.",
+    },
+]
+
+_DEFAULT_STATE: Dict[str, Any] = {
+    "limits": {},
+    "routing": [],
+    "use_case_routes": [],
+    "show_custom_local": False,
+    "usage": {},
+}
 
 
 def read_state() -> Dict[str, Any]:
@@ -306,6 +463,129 @@ def _windows(events: List[float], now: Optional[float] = None) -> Dict[str, int]
     }
 
 
+def _limits(hourly: int, daily: int, monthly: int, source: str = "catalog") -> Dict[str, Any]:
+    return {"hourly": hourly, "daily": daily, "monthly": monthly, "source": source}
+
+
+def _default_limits_for_cli(c: Dict[str, Any]) -> Dict[str, Any]:
+    cid = c.get("id", "")
+    if cid == "qwen":
+        return _limits(120, 1800, 50000)
+    if cid in ("codex", "claude", "copilot"):
+        return _limits(20, 120, 2500)
+    if cid in ("gemini", "opencode"):
+        return _limits(60, 500, 10000)
+    if cid in ("ollama", "hermes"):
+        return _limits(999, 9999, 999999)
+    if cid in ("gh", "glab"):
+        return _limits(1000, 5000, 100000)
+    if c.get("category") == "AI Coding":
+        return _limits(20, 100, 2000)
+    if c.get("category") == "AI Tools":
+        return _limits(60, 300, 5000)
+    return _limits(100, 1000, 30000)
+
+
+def _default_limits_for_provider(p: Dict[str, Any]) -> Dict[str, Any]:
+    pid = p.get("id", "")
+    tier = p.get("tier", "")
+    if pid == "qwen-oauth":
+        return _limits(120, 1800, 50000)
+    if tier == "subscription":
+        return _limits(20, 120, 2500)
+    if tier == "free":
+        return _limits(60, 500, 10000)
+    if tier == "trial":
+        return _limits(30, 200, 3000)
+    if tier == "cheap":
+        return _limits(120, 2000, 50000)
+    if tier == "local":
+        return _limits(999, 9999, 999999)
+    return _limits(60, 500, 10000)
+
+
+def _default_limits_for_media(m: Dict[str, Any]) -> Dict[str, Any]:
+    cat = m.get("category", "")
+    if m.get("keyless"):
+        return _limits(120, 1000, 30000)
+    if cat == "Image":
+        return _limits(30, 200, 3000)
+    if cat == "Video":
+        return _limits(10, 50, 500)
+    if cat == "Music":
+        return _limits(10, 80, 1000)
+    if cat in ("Voice / TTS", "Speech-to-Text"):
+        return _limits(60, 500, 10000)
+    return _limits(30, 200, 3000)
+
+
+def _effective_limits(state: Dict[str, Any], key: str, defaults: Dict[str, Any],
+                      legacy_key: Optional[str] = None) -> Dict[str, Any]:
+    saved = state.get("limits", {}).get(key)
+    if not isinstance(saved, dict) and legacy_key:
+        saved = state.get("limits", {}).get(legacy_key)
+    if not isinstance(saved, dict):
+        return dict(defaults)
+    out = dict(defaults)
+    out.update({
+        "hourly": int(saved.get("hourly", out["hourly"]) or out["hourly"]),
+        "daily": int(saved.get("daily", out["daily"]) or out["daily"]),
+        "monthly": int(saved.get("monthly", out["monthly"]) or out["monthly"]),
+        "source": "custom",
+    })
+    return out
+
+
+def _target_key(kind: str, raw_id: str) -> str:
+    return f"{kind}:{raw_id}"
+
+
+def _media_usage(media_id: str, category: str, state: Dict[str, Any]) -> Dict[str, int]:
+    events: List[float] = list(state.get("usage", {}).get(_target_key("media", media_id), []))
+    if category == "Image":
+        events.extend(state.get("usage", {}).get("media:image", []))
+    elif category == "Video":
+        events.extend(state.get("usage", {}).get("media:video", []))
+    elif category == "Music":
+        events.extend(state.get("usage", {}).get("media:music", []))
+    return _windows(events)
+
+
+def _current_platform() -> str:
+    name = platform.system().lower()
+    if name == "darwin":
+        return "mac"
+    if name.startswith("win"):
+        return "windows"
+    if name == "linux":
+        return "linux"
+    return name or "unknown"
+
+
+def _install_options(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    current = _current_platform()
+    meta = entry.get("install_meta") or {}
+    options: List[Dict[str, Any]] = []
+    for key, cmd in (entry.get("install") or {}).items():
+        item = meta.get(key, {})
+        platforms = item.get("platforms") or ["mac", "linux", "windows"]
+        prereq = _MANAGER_PREREQ.get(key, {})
+        prereq_bin = prereq.get("bin") or ""
+        options.append({
+            "manager": key,
+            "label": item.get("label") or key,
+            "command": cmd,
+            "platforms": platforms,
+            "executable": current in platforms,
+            "prereq": prereq.get("label") or "",
+            "prereq_check": prereq.get("check") or "",
+            "prereq_get": prereq.get("get") or "",
+            # None = unknown (no probe); True/False = probed presence.
+            "prereq_ok": (shutil.which(prereq_bin) is not None) if prereq_bin else None,
+        })
+    return options
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -328,6 +608,8 @@ async def scan():
         binary = c["bin"]
         path = shutil.which(binary)
         installed = path is not None
+        if c.get("hide_when_missing") and not installed:
+            continue
         version = _probe_version(binary, c.get("version_args", ["--version"])) if installed else None
         auth_spec = c.get("auth")
         auth = _auth_state(auth_spec) if installed else "unknown"
@@ -345,15 +627,21 @@ async def scan():
             "version": version,
             "auth_supported": auth_spec is not None,
             "auth": auth,
+            "auth_command": c.get("auth_command"),
+            "auth_hint": c.get("auth_hint"),
             "status": status,
             "provider": c.get("provider"),
+            "provider_env": PROVIDER_KEY_ENV.get(c.get("provider") or "", ""),
             "plan": c.get("plan"),
+            "deprecated": bool(c.get("deprecated")),
             "worker": c["id"] in _DELEGATE_PRIORITY,
             "worker_rank": (_DELEGATE_PRIORITY.index(c["id"]) + 1) if c["id"] in _DELEGATE_PRIORITY else None,
             "install_managers": list((c.get("install") or {}).keys()),
+            "install_options": _install_options(c),
+            "install_hint": c.get("install_hint"),
             "docs": c.get("docs"),
-            "limits": limits.get(c["id"], {"hourly": 0, "daily": 0, "monthly": 0}),
-            "usage": _windows(usage.get(c["id"], [])),
+            "limits": _effective_limits(state, _target_key("cli", c["id"]), _default_limits_for_cli(c), c["id"]),
+            "usage": _windows(usage.get(_target_key("cli", c["id"]), usage.get(c["id"], []))),
         })
     return {"clis": rows, "scanned_at": int(time.time())}
 
@@ -373,13 +661,15 @@ async def get_limits():
 @router.post("/limits")
 async def set_limits(body: LimitBody):
     state = read_state()
-    state.setdefault("limits", {})[body.id] = {
+    key = body.id.strip()
+    state.setdefault("limits", {})[key] = {
         "hourly": max(0, int(body.hourly)),
         "daily": max(0, int(body.daily)),
         "monthly": max(0, int(body.monthly)),
+        "source": "custom",
     }
     write_state(state)
-    return {"ok": True, "limits": state["limits"][body.id]}
+    return {"ok": True, "limits": state["limits"][key]}
 
 
 @router.get("/usage")
@@ -396,13 +686,26 @@ class IncrBody(BaseModel):
 async def incr_usage(body: IncrBody):
     state = read_state()
     usage = state.setdefault("usage", {})
-    events = usage.setdefault(body.id, [])
+    key = body.id.strip()
+    events = usage.setdefault(key, [])
     now = time.time()
     events.append(now)
     # Trim anything older than ~40 days to keep the file small.
-    usage[body.id] = [t for t in events if t >= now - 3456000]
+    usage[key] = [t for t in events if t >= now - 3456000]
     write_state(state)
-    return {"ok": True, "usage": _windows(usage[body.id], now)}
+    return {"ok": True, "usage": _windows(usage[key], now)}
+
+
+class CustomLocalBody(BaseModel):
+    enabled: bool = True
+
+
+@router.post("/custom-local")
+async def set_custom_local(body: CustomLocalBody):
+    state = read_state()
+    state["show_custom_local"] = bool(body.enabled)
+    write_state(state)
+    return {"ok": True, "show_custom_local": state["show_custom_local"]}
 
 
 class RoutingRule(BaseModel):
@@ -449,6 +752,10 @@ async def install(body: InstallBody):
     cmd = installers.get(manager)
     if not cmd:
         raise HTTPException(400, f"No '{manager}' installer for {body.id}")
+    option = next((o for o in _install_options(entry) if o["manager"] == manager), None)
+    if option and not option["executable"]:
+        platforms = ", ".join(option["platforms"])
+        raise HTTPException(400, f"Installer '{manager}' is for {platforms}, not {_current_platform()}")
 
     log_path = logs_dir() / f"{body.id}.log"
     with open(log_path, "w", encoding="utf-8") as fh:
@@ -486,6 +793,88 @@ async def install_status(id: str):
     }
 
 
+class AssistBody(BaseModel):
+    id: str
+    manager: Optional[str] = None
+    question: Optional[str] = None
+    log: Optional[str] = None
+
+
+def _pick_assist_worker() -> Optional[str]:
+    """First installed worker CLI in priority order (the free 'AI help' brain)."""
+    for w in _DELEGATE_PRIORITY:
+        if w in _ASSIST_ARGV and shutil.which(w):
+            return w
+    return None
+
+
+@router.post("/install/assist")
+async def install_assist(body: AssistBody):
+    """Answer an install/auth question by delegating to an installed worker CLI
+    (codex/claude/qwen/opencode) — or Ollama as the free floor. This is the
+    'get help from AI' action: it runs through the same governed CLIs this
+    plugin orchestrates, so it stays free and needs no extra API key."""
+    cat = {c["id"]: c for c in load_catalog()}
+    entry = cat.get(body.id)
+    if not entry:
+        raise HTTPException(404, f"Unknown CLI id: {body.id}")
+
+    opts = _install_options(entry)
+    opt = next((o for o in opts if o["manager"] == body.manager), opts[0] if opts else None)
+    cmd = opt["command"] if opt else ""
+    plat = _current_platform()
+    parts = [
+        f"I'm installing the '{entry['name']}' command-line tool "
+        f"(binary: {entry['bin']}) on {plat}.",
+    ]
+    if cmd:
+        parts.append(f"The intended install command is: {cmd}")
+    if entry.get("auth_command"):
+        parts.append(f"After install it is authenticated with: {entry['auth_command']}")
+    if body.log:
+        parts.append("Here is the tail of the install log (may contain the error):\n"
+                     + body.log[-1500:])
+    parts.append(body.question.strip() if (body.question and body.question.strip())
+                 else "Give me the exact, ordered shell steps to install and "
+                      "authenticate it, plus fixes for the most common errors. "
+                      "Be concise and command-first.")
+    prompt = "\n\n".join(parts)
+
+    worker = _pick_assist_worker()
+    argv = None
+    used = None
+    if worker:
+        argv = _ASSIST_ARGV[worker](prompt)
+        used = worker
+    elif shutil.which("ollama"):
+        model = os.environ.get("CLI_ASSIST_OLLAMA_MODEL", "qwen3.5:latest")
+        argv = ["ollama", "run", model, prompt]
+        used = f"ollama/{model}"
+
+    if not argv:
+        return {
+            "ok": False,
+            "worker": None,
+            "text": "No worker CLI is installed to answer. Install one of "
+                    "codex / claude / qwen / opencode (or Ollama for a free local "
+                    "answer), then try again. Meanwhile, the steps and the setup "
+                    "docs link on this card cover the standard path.",
+        }
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "worker": used,
+                "text": f"{used} took too long to answer (>180s). Try again or "
+                        "follow the written steps on this card."}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "worker": used, "text": f"Could not run {used}: {exc}"}
+
+    text = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    if not text:
+        text = f"{used} returned no output (exit {proc.returncode})."
+    return {"ok": proc.returncode == 0, "worker": used, "text": text[-6000:]}
+
+
 def _model_provider_map() -> Dict[str, str]:
     """Map model id -> provider from the active config chain (best effort)."""
     out: Dict[str, str] = {}
@@ -503,6 +892,15 @@ def _model_provider_map() -> Dict[str, str]:
     except Exception:
         pass
     return out
+
+
+def _provider_usage(provider_id: str, state: Dict[str, Any]) -> Dict[str, int]:
+    events: List[float] = list(state.get("usage", {}).get(_target_key("provider", provider_id), []))
+    prov = _model_provider_map()
+    for model, model_events in state.get("model_usage", {}).items():
+        if prov.get(model) == provider_id and isinstance(model_events, list):
+            events.extend(model_events)
+    return _windows(events)
 
 
 @router.get("/model-usage")
@@ -715,13 +1113,65 @@ def _read_env_file() -> Dict[str, str]:
 
 
 def _key_present(env_name: str, env_file: Dict[str, str]) -> bool:
-    return bool(os.environ.get(env_name)) or bool(env_file.get(env_name))
+    return bool(os.environ.get(env_name)) or bool(env_file.get(env_name)) or any(
+        k.startswith(f"{env_name}_") and bool(v) for k, v in env_file.items()
+    )
+
+
+def _key_count(env_name: str, env_file: Dict[str, str]) -> int:
+    values: List[str] = []
+    raw_values = [os.environ.get(env_name), env_file.get(env_name)]
+    raw_values.extend(v for k, v in env_file.items() if k.startswith(f"{env_name}_"))
+    for raw in raw_values:
+        if not raw:
+            continue
+        values.append(str(raw).strip())
+    return len([p for p in values if p])
+
+
+def _write_env_value(key: str, value: str, append: bool = False) -> None:
+    f = _env_file()
+    lines = f.read_text(encoding="utf-8").splitlines() if f.exists() else []
+    existing_keys = {
+        line.split("=", 1)[0].strip()
+        for line in lines
+        if line.strip() and not line.strip().startswith("#") and "=" in line
+    }
+    if append and key in existing_keys:
+        idx = 2
+        while f"{key}_{idx}" in existing_keys:
+            idx += 1
+        lines.append(f"{key}_{idx}={value}")
+        f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            os.chmod(f, 0o600)
+        except Exception:
+            pass
+        return
+    replaced = False
+    for i, line in enumerate(lines):
+        if line.strip().split("=", 1)[0].strip() == key:
+            if append and line.split("=", 1)[1].strip():
+                existing = line.split("=", 1)[1].strip()
+                lines[i] = f"{key}={existing},{value}"
+            else:
+                lines[i] = f"{key}={value}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"{key}={value}")
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(f, 0o600)
+    except Exception:
+        pass
 
 
 @router.get("/media/scan")
 async def media_scan():
     """Detect every media backend: configured (key present / local bin) + label."""
     env_file = _read_env_file()
+    state = read_state()
     rows: List[Dict[str, Any]] = []
     for m in MEDIA_CATALOG:
         envs = m.get("env", [])
@@ -738,6 +1188,9 @@ async def media_scan():
             "id": m["id"], "name": m["name"], "category": m["category"],
             "kind": m["kind"], "mechanism": m["mechanism"],
             "env": envs, "needs_key": bool(envs),
+            "key_count": sum(_key_count(e, env_file) for e in envs),
+            "limits": _effective_limits(state, _target_key("media", m["id"]), _default_limits_for_media(m), m["id"]),
+            "usage": _media_usage(m["id"], m["category"], state),
             "configured": configured,
             "signup": m.get("signup"), "docs": m.get("docs"),
         })
@@ -747,6 +1200,7 @@ async def media_scan():
 class MediaKeyBody(BaseModel):
     env: str
     value: str
+    append: bool = False
 
 
 @router.post("/media/key")
@@ -759,22 +1213,9 @@ async def media_set_key(body: MediaKeyBody):
     value = body.value.strip()
     if not value:
         raise HTTPException(400, "Empty value")
-    f = _env_file()
-    lines = f.read_text(encoding="utf-8").splitlines() if f.exists() else []
-    replaced = False
-    for i, line in enumerate(lines):
-        if line.strip().split("=", 1)[0].strip() == key:
-            lines[i] = f"{key}={value}"
-            replaced = True
-            break
-    if not replaced:
-        lines.append(f"{key}={value}")
-    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    try:
-        os.chmod(f, 0o600)
-    except Exception:
-        pass
-    return {"ok": True, "env": key, "saved": True}  # never echo the value
+    _write_env_value(key, value, append=body.append)
+    env_file = _read_env_file()
+    return {"ok": True, "env": key, "saved": True, "key_count": _key_count(key, env_file)}  # never echo the value
 
 
 # ===========================================================================
@@ -833,6 +1274,8 @@ PROVIDERS_CATALOG: List[Dict[str, Any]] = [
      "limit": "Local — free, hardware-bound"},
 ]
 
+_PROVIDER_ENV_KEYS = {p.get("env") for p in PROVIDERS_CATALOG if p.get("env")}
+
 
 def _config_path() -> Path:
     return hermes_home() / "config.yaml"
@@ -884,10 +1327,15 @@ async def providers_scan():
     position, and cooldown (when an exhausted one is callable again)."""
     env_file = _read_env_file()
     positions = _chain_positions()
-    cooldowns = read_state().get("cooldowns", {})
+    state = read_state()
+    cooldowns = state.get("cooldowns", {})
+    show_custom_local = bool(state.get("show_custom_local"))
+    ollama_detected = shutil.which("ollama") is not None
     now = time.time()
     rows: List[Dict[str, Any]] = []
     for p in PROVIDERS_CATALOG:
+        if p["id"] == "custom" and not (show_custom_local or ollama_detected or positions.get("custom")):
+            continue
         auth = p["auth"]
         if auth == "api_key":
             authed = _key_present(p["env"], env_file) if p.get("env") else False
@@ -902,6 +1350,9 @@ async def providers_scan():
         rows.append({
             **{k: p[k] for k in ("id", "name", "tier", "auth", "env", "model", "signup", "limit")},
             "authed": authed,
+            "key_count": _key_count(p["env"], env_file) if p.get("env") else 0,
+            "limits": _effective_limits(state, _target_key("provider", p["id"]), _default_limits_for_provider(p), p["id"]),
+            "usage": _provider_usage(p["id"], state),
             "position": positions.get(p["id"]),  # primary / fallback #N / None
             "cooling_down": cooling,
             "cooldown_until": cd.get("until") if cd else None,
@@ -912,6 +1363,68 @@ async def providers_scan():
     order = {"free": 0, "trial": 1, "cheap": 2, "subscription": 3, "local": 4}
     rows.sort(key=lambda r: (order.get(r["tier"], 9), r["name"]))
     return {"providers": rows, "scanned_at": int(now)}
+
+
+class ProviderKeyBody(BaseModel):
+    env: str
+    value: str
+    append: bool = False
+
+
+@router.post("/providers/key")
+async def provider_set_key(body: ProviderKeyBody):
+    key = body.env.strip()
+    if key not in _PROVIDER_ENV_KEYS:
+        raise HTTPException(400, f"Unknown / disallowed provider env key: {key}")
+    value = body.value.strip()
+    if not value:
+        raise HTTPException(400, "Empty value")
+    _write_env_value(key, value, append=body.append)
+    env_file = _read_env_file()
+    return {"ok": True, "env": key, "saved": True, "key_count": _key_count(key, env_file)}
+
+
+class UseCaseRoute(BaseModel):
+    use_case: str
+    mode: str
+    target: str
+    fallback: Optional[str] = ""
+    enabled: bool = True
+
+
+class UseCaseRoutesBody(BaseModel):
+    routes: List[UseCaseRoute]
+
+
+@router.get("/use-cases")
+async def get_use_cases():
+    state = read_state()
+    return {
+        "use_cases": USE_CASES,
+        "routes": state.get("use_case_routes", []),
+        "show_custom_local": bool(state.get("show_custom_local")),
+    }
+
+
+@router.post("/use-cases")
+async def set_use_cases(body: UseCaseRoutesBody):
+    known = {u["id"] for u in USE_CASES}
+    clean = []
+    for r in body.routes:
+        uc = r.use_case.strip()
+        if uc not in known or not r.target.strip():
+            continue
+        clean.append({
+            "use_case": uc,
+            "mode": (r.mode or "auto").strip(),
+            "target": r.target.strip(),
+            "fallback": (r.fallback or "").strip(),
+            "enabled": bool(r.enabled),
+        })
+    st = read_state()
+    st["use_case_routes"] = clean
+    write_state(st)
+    return {"ok": True, "routes": clean}
 
 
 class ChainEntry(BaseModel):

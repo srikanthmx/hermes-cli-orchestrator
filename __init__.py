@@ -39,7 +39,8 @@ PLUGIN_ID = "cli-orchestrator"
 DELEGATION_HINTS = {
     "codex": "run `codex exec \"<task>\"` via the terminal tool (non-interactive, free via ChatGPT sub)",
     "claude": "run `claude -p \"<task>\"` via the terminal tool, or load the `claude-code` skill",
-    "gemini": "run `gemini -p \"<task>\"` via the terminal tool",
+    "antigravity": "use Antigravity CLI for Google individual/free workflows; configure the exact non-interactive command before delegation",
+    "gemini": "legacy: Gemini CLI consumer/free requests stop on 2026-06-18; use only for Enterprise/API-key access",
     "qwen": "run `qwen -p \"<task>\"` via the terminal tool (free Qwen OAuth)",
     "opencode": "run `opencode run \"<task>\"` via the terminal tool, or load the `opencode` skill",
     "crush": "run `crush run \"<task>\"` via the terminal tool",
@@ -52,7 +53,7 @@ DELEGATION_HINTS = {
 # Capable coding CLIs, in default priority order (used when no explicit
 # orchestration-matrix rule maps an intent to a CLI).
 CODING_PRIORITY = ("codex", "claude", "qwen", "opencode", "crush", "amp",
-                   "cursor-agent", "goose", "aider", "gemini", "copilot")
+                   "cursor-agent", "goose", "aider", "copilot")
 
 # Non-interactive one-shot invocation per CLI, as argv lists (no shell → no
 # injection). The task is passed as a single argument. Only CLIs with a clean
@@ -60,7 +61,6 @@ CODING_PRIORITY = ("codex", "claude", "qwen", "opencode", "crush", "amp",
 DELEGATE_ARGV = {
     "codex": lambda task: ["codex", "exec", "--skip-git-repo-check", task],
     "claude": lambda task: ["claude", "-p", task],
-    "gemini": lambda task: ["gemini", "-p", task],
     "qwen": lambda task: ["qwen", "-p", task],
     "opencode": lambda task: ["opencode", "run", task],
 }
@@ -74,6 +74,7 @@ RATE_LIMIT_PATTERNS = (
 TRACKED_BINS = {
     "claude": "claude",
     "codex": "codex",
+    "antigravity": "antigravity",
     "gemini": "gemini",
     "qwen": "qwen",
     "cursor-agent": "cursor-agent",
@@ -108,13 +109,15 @@ def _state_file() -> Path:
 def _read_state() -> dict:
     f = _state_file()
     if not f.exists():
-        return {"limits": {}, "routing": [], "usage": {}}
+        return {"limits": {}, "routing": [], "use_case_routes": [], "usage": {}}
     try:
         data = json.loads(f.read_text(encoding="utf-8"))
         data.setdefault("usage", {})
+        data.setdefault("routing", [])
+        data.setdefault("use_case_routes", [])
         return data
     except Exception:
-        return {"limits": {}, "routing": [], "usage": {}}
+        return {"limits": {}, "routing": [], "use_case_routes": [], "usage": {}}
 
 
 def _write_state(data: dict) -> None:
@@ -146,20 +149,43 @@ def _first_binary(command: str) -> str | None:
     return None
 
 
-def _record_usage(cli_id: str) -> None:
+def _record_target_usage(target_key: str) -> None:
     state = _read_state()
     usage = state.setdefault("usage", {})
-    events = usage.setdefault(cli_id, [])
+    events = usage.setdefault(target_key, [])
     now = time.time()
     events.append(now)
-    usage[cli_id] = [t for t in events if t >= now - 3456000]  # keep ~40 days
+    usage[target_key] = [t for t in events if t >= now - 3456000]  # keep ~40 days
     _write_state(state)
 
 
+def _record_usage(cli_id: str) -> None:
+    _record_target_usage(f"cli:{cli_id}")
+
+
+def _default_cli_daily(cli_id: str) -> int:
+    if cli_id == "qwen":
+        return 1800
+    if cli_id in ("codex", "claude", "copilot"):
+        return 120
+    if cli_id in ("gemini", "opencode"):
+        return 500
+    if cli_id in ("ollama", "hermes"):
+        return 9999
+    if cli_id in ("gh", "glab"):
+        return 5000
+    return 100
+
+
 def _on_post_tool_call(tool_name=None, args=None, result=None, task_id=None, **kwargs):
-    """Fires after every tool call. We only care about ``terminal`` commands
-    whose program is one of our tracked CLIs."""
+    """Fires after tool calls and records tracked CLI/media usage."""
     try:
+        if tool_name in ("image_generation", "generate_image", "image_gen"):
+            _record_target_usage("media:image")
+            return
+        if tool_name in ("video_generation", "generate_video", "video_gen"):
+            _record_target_usage("media:video")
+            return
         if tool_name != "terminal":
             return
         command = ""
@@ -199,10 +225,13 @@ def _primary_is_local() -> bool:
 
 def _over_cap(cli_id: str, state: dict) -> bool:
     """True if this CLI is at/over its daily cap (so we shouldn't route to it)."""
-    cap = (state.get("limits", {}).get(cli_id) or {}).get("daily", 0) or 0
+    limits = state.get("limits", {})
+    cap = ((limits.get(f"cli:{cli_id}") or limits.get(cli_id) or {}).get("daily")
+           or _default_cli_daily(cli_id))
     if cap <= 0:
         return False
-    events = state.get("usage", {}).get(cli_id, [])
+    usage = state.get("usage", {})
+    events = usage.get(f"cli:{cli_id}", usage.get(cli_id, []))
     now = time.time()
     return sum(1 for t in events if t >= now - 86400) >= cap
 
@@ -217,36 +246,44 @@ def _on_pre_llm_call(session_id=None, user_message=None, model=None,
     capable CLI is installed — then the local model just answers normally.
     """
     try:
-        if not _primary_is_local():
-            return None  # capable primary handles heavy work directly — no policy needed
         state = _read_state()
+        primary_is_local = _primary_is_local()
         installed = {cid: b for cid, b in TRACKED_BINS.items() if shutil.which(b)}
         # Capable coding CLIs that are installed AND under their cap.
         capable = [c for c in CODING_PRIORITY
                    if c in installed and not _over_cap(c, state)]
-        if not capable:
-            return None  # nothing to delegate to → local model handles it all
 
         lines = [
             "[CLI Orchestrator — routing policy]",
-            "You are a local orchestrator on a small free model. Do NOT attempt "
-            "high-intensity work yourself. For code generation, refactors, "
-            "multi-file edits, or debugging, CALL the `cli_delegate` tool with a "
-            "`task` (and optional `kind`) — it routes to the best available CLI, "
-            "respects daily caps, and falls back automatically if one is "
-            "rate-limited. Then summarize or verify what it returns.",
         ]
+        if primary_is_local and capable:
+            lines.append(
+                "You are a local orchestrator on a small free model. Do NOT attempt "
+                "high-intensity work yourself. For code generation, refactors, "
+                "multi-file edits, or debugging, CALL the `cli_delegate` tool with a "
+                "`task` (and optional `kind`) - it routes to the best available CLI, "
+                "respects daily caps, and falls back automatically if one is "
+                "rate-limited. Then summarize or verify what it returns."
+            )
+        use_case_routes = [r for r in (state.get("use_case_routes") or [])
+                           if r.get("enabled", True) and r.get("target")]
+        if use_case_routes:
+            lines.append("Use-case routing matrix:")
+            for r in use_case_routes:
+                fallback = f" then `{r.get('fallback')}`" if r.get("fallback") else ""
+                lines.append(f"- {r.get('use_case')} -> {r.get('mode')} `{r.get('target')}`{fallback}.")
         # Mention explicit intent→CLI rules so the model passes a good `kind`.
         rules = [r for r in (state.get("routing") or []) if r.get("cli") in capable]
         for r in rules:
             lines.append(f"- {r.get('intent')} → prefers `{r['cli']}` "
                         f"(pass kind='{r.get('intent')}').")
-        lines.append("- Image generation: use the image_generation tool.")
-        lines.append("- Music generation: use the generate_music tool.")
-        lines.append("- Simple questions, planning, summaries: answer directly "
-                    "(no delegation).")
-        lines.append(f"Capable CLIs available now (priority order): "
-                    f"{', '.join(capable)}.")
+        lines.append("- If the user asks to generate, draw, create, edit, or render an image, use the image_generation tool; do not send image tasks to the default chat model.")
+        lines.append("- If the user asks for video, voice, transcription, audio, or music, prefer the matching media tool/backend; use generate_music for music.")
+        if primary_is_local and capable:
+            lines.append("- Simple questions, planning, summaries: answer directly "
+                        "(no delegation).")
+            lines.append(f"Capable CLIs available now (priority order): "
+                        f"{', '.join(capable)}.")
         return {"context": "\n".join(lines)}
     except Exception as exc:  # never break the turn
         logger.debug("cli-orchestrator routing policy skipped: %s", exc)
@@ -297,9 +334,10 @@ def _handle_cli_command(raw_args: str):
     lines = ["CLI Matrix — local CLI status", ""]
     for cli_id, binary in TRACKED_BINS.items():
         present = shutil.which(binary) is not None
-        events = usage.get(cli_id, [])
+        events = usage.get(f"cli:{cli_id}", usage.get(cli_id, []))
         day = sum(1 for t in events if t >= now - 86400)
-        cap = (limits.get(cli_id) or {}).get("daily", 0) or 0
+        cap = ((limits.get(f"cli:{cli_id}") or limits.get(cli_id) or {}).get("daily")
+               or _default_cli_daily(cli_id))
         mark = "●" if present else "○"
         cap_str = f"/{cap}" if cap else ""
         lines.append(f"  {mark} {binary:<10} today: {day}{cap_str}")
@@ -557,10 +595,30 @@ DELEGATE_SCHEMA = {
 def _delegate_candidates(kind: str, state: dict) -> list:
     """Ordered, filtered list of CLIs to try: routing rule for `kind` first,
     then priority order; only installed + delegation-capable ones."""
+    def clean_cli(value: str | None) -> str | None:
+        if not value:
+            return None
+        value = str(value)
+        if ":" in value:
+            typ, raw = value.split(":", 1)
+            if typ != "cli":
+                return None
+            return raw
+        return value
+
     ordered: list = []
     if kind:
+        for r in state.get("use_case_routes", []):
+            if not r.get("enabled", True):
+                continue
+            haystack = (str(r.get("use_case", "")) + " " + str(r.get("mode", ""))).lower()
+            if kind.lower() in haystack or haystack in kind.lower():
+                for key in ("target", "fallback"):
+                    cli = clean_cli(r.get(key))
+                    if cli and cli not in ordered:
+                        ordered.append(cli)
         for r in state.get("routing", []):
-            cli = r.get("cli")
+            cli = clean_cli(r.get("cli"))
             if cli and kind.lower() in (r.get("intent", "").lower()) and cli not in ordered:
                 ordered.append(cli)
     for c in CODING_PRIORITY:
@@ -682,6 +740,7 @@ def _generate_music(args: dict, **kwargs) -> str:
                 return json.dumps({"error": "no audio output from MusicGen"})
             data = http.get(audio_url, follow_redirects=True).content
         path = _save_audio_bytes(data, ext="wav")
+        _record_target_usage("media:replicate-music")
         return json.dumps({"ok": True, "audio": path, "prompt": prompt,
                            "provider": "replicate-musicgen"})
     except Exception as exc:

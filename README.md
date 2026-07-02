@@ -66,7 +66,45 @@ First launch builds the web UI once, then opens `http://127.0.0.1:9119`.
 > Open it from the URL Hermes launches — it carries the loopback token; a hand-typed tab bounces to login.
 
 ### 5. Open the **CLI Matrix** tab
-Right after **Skills** in the left nav. Detection, limits, install, routing, and the Media panel all work with **no model configured**.
+Right after **Skills** in the left nav. The dashboard is organized by use case:
+**Coding**, **Chat**, **Image**, **Audio**, **Video**, **Research**, **Docs**,
+**Automation**, and **Other**. Each view shows the configured CLI/model/media
+targets as an editable readiness matrix, with route priority, fallback,
+credential slots, caps, install actions, auth guidance, verify actions, and key
+entry in one place. Detection, limits, install, routing, and media keys all work
+with **no model configured**.
+Limits are prefilled from the catalog/provider tier instead of showing blank
+zeroes; saved values override the prefill.
+Local/custom targets are not pushed into the default flow. They appear only when
+detected/configured or when you explicitly choose **Add custom/local**, and they
+sort to the end of each matrix.
+Google's May 19, 2026 transition notice is reflected too: Antigravity CLI is the
+forward path for individual/free Google workflows, while Gemini CLI is treated
+as legacy and shown only if installed or explicitly configured for Enterprise /
+API-key use.
+
+Antigravity CLI install/auth flow:
+```bash
+# macOS and Linux, from Google's Antigravity CLI install docs
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+```powershell
+# Windows PowerShell
+irm https://antigravity.google/cli/install.ps1 | iex
+```
+
+```bat
+# Windows CMD
+curl -fsSL https://antigravity.google/cli/install.cmd -o install.cmd && install.cmd && del install.cmd
+```
+
+```bash
+# then run once and complete Google's interactive sign-in
+antigravity
+```
+Linux apt/dnf repository steps are also in Google's install page and linked from
+the same row via **setup docs**: https://antigravity.google/docs/cli/install
 
 ### 6. (Optional) install the bundled media backends
 This repo ships extra Hermes provider-plugins under `backends/` to make media work:
@@ -89,10 +127,12 @@ Free local speech-to-text just needs the dependency: `uv pip install -p ~/.herme
 | Action | Where | What happens |
 |--------|-------|--------------|
 | **Re-scan** | top-right | Re-probes `which` + versions + auth |
-| **Set caps** | per-CLI card | Saves hourly/daily/monthly to `state.json` |
-| **Install** | per-CLI card (Missing) | Runs the catalog install command, streams logs |
-| **Route intents** | Orchestration matrix | Saves intent → CLI rules (drives the routing policy) |
-| **Add media key** | Media panel | Saves an API key to `~/.hermes/.env` (chmod 600) |
+| **Set caps** | Matrix limits column | Saves hourly/daily/monthly caps for CLI, provider, or media targets to `state.json` |
+| **Install** | Matrix configure column | Runs the catalog install command, then the same row shows auth/key setup and verify |
+| **Route use cases** | Matrix route controls | Saves explicit primary + fallback targets for Coding, Chat, Image, Audio, Video, Research, Docs, Automation, and Other |
+| **Route legacy intents** | `/cli-route` or API | Saves intent → CLI rules (still honored by the runtime policy) |
+| **Add provider/media key** | Matrix configure column | Saves an API key to `~/.hermes/.env` (chmod 600); extra slots are stored as `KEY_2`, `KEY_3`, ... |
+| **Authenticate CLI** | Matrix configure column | Shows the CLI-specific login command and docs; use **Verify** after completing auth |
 | **Quick status** | `/cli` in any session | Installed CLIs + today's usage |
 | **Generate music** | `generate_music` tool | MusicGen via Replicate (needs `REPLICATE_API_TOKEN`) |
 
@@ -155,7 +195,10 @@ Replicate both offer free trial credits.
 ## State & customization
 
 - Mutable state (limits, routing rules, usage events) lives in `~/.hermes/cli-orchestrator/state.json` — outside this repo.
-- Media API keys live in `~/.hermes/.env` (mode 600).
+- Provider and media API keys live in `~/.hermes/.env` (mode 600). When adding
+  another key for the same env var, the dashboard stores it as `KEY_2`, `KEY_3`,
+  etc. so the primary provider env var stays compatible with clients that expect
+  exactly one token.
 - Extend the CLI catalog by dropping a `catalog.json` (same shape as `DEFAULT_CATALOG` in `dashboard/plugin_api.py`) into `~/.hermes/cli-orchestrator/`.
 
 ---

@@ -1,12 +1,9 @@
 /**
- * CLI Orchestrator — "CLI Matrix" dashboard tab.
+ * CLI Orchestrator dashboard.
  *
- * Plain IIFE (no build step). Uses the globals the Hermes dashboard exposes:
- *   window.__HERMES_PLUGIN_SDK__  — React, hooks, components, fetchJSON, utils
- *   window.__HERMES_PLUGINS__     — register(name, Component)
- *
- * Backend lives in ../plugin_api.py, mounted at
- *   /api/plugins/cli-orchestrator/
+ * Plain IIFE, no build step. Uses Hermes dashboard globals:
+ *   window.__HERMES_PLUGIN_SDK__
+ *   window.__HERMES_PLUGINS__
  */
 (function () {
   "use strict";
@@ -23,10 +20,23 @@
   };
 
   var BASE = "/api/plugins/cli-orchestrator";
+  var USE_CASE_ORDER = ["coding", "chat", "image", "audio", "video", "research", "docs", "automation", "other"];
+  var USE_CASE_NAMES = {
+    coding: "Coding",
+    chat: "Chat",
+    image: "Image",
+    audio: "Audio",
+    video: "Video",
+    research: "Research",
+    docs: "Docs",
+    automation: "Automation",
+    other: "Other",
+  };
 
   function getJSON(path) {
     return SDK.fetchJSON(BASE + path);
   }
+
   function postJSON(path, body) {
     return SDK.fetchJSON(BASE + path, {
       method: "POST",
@@ -35,541 +45,648 @@
     });
   }
 
-  // ── tiny presentational helpers ──────────────────────────────────────────
-  function StatusBadge(status, auth) {
-    var map = {
-      online: ["Online", "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"],
-      unauthenticated: ["Not Authenticated", "text-amber-400 border-amber-500/40 bg-amber-500/10"],
-      missing: ["Missing", "text-zinc-400 border-zinc-500/40 bg-zinc-500/10"],
+  function pill(text, tone) {
+    var tones = {
+      ok: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+      warn: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+      bad: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+      info: "border-sky-500/40 bg-sky-500/10 text-sky-300",
+      neutral: "border-border bg-background/40 text-muted-foreground",
     };
-    var m = map[status] || map.missing;
     return h("span", {
-      className: cn(
-        "inline-flex items-center gap-1.5 border px-2 py-0.5 text-[11px] font-courier uppercase tracking-wider",
-        m[1]
-      ),
-    },
-      h("span", { className: "inline-block h-1.5 w-1.5 rounded-full bg-current" }),
-      m[0]
-    );
+      className: cn("inline-flex items-center whitespace-nowrap border px-2 py-0.5 text-[11px] font-courier uppercase", tones[tone] || tones.neutral),
+    }, text);
   }
 
-  function Gauge(pct, label, sub) {
-    pct = Math.max(0, Math.min(100, pct || 0));
-    var danger = pct >= 90, warn = pct >= 70;
-    var color = danger ? "bg-rose-500" : warn ? "bg-amber-400" : "bg-emerald-400";
-    return h("div", { className: "flex flex-col gap-1" },
-      h("div", { className: "flex items-baseline justify-between" },
-        h("span", { className: "text-xs text-muted-foreground uppercase tracking-wider" }, label),
-        h("span", { className: "font-courier text-sm" }, pct + "%")
-      ),
-      h("div", { className: "h-1.5 w-full overflow-hidden rounded-full bg-foreground/10" },
-        h("div", { className: cn("h-full rounded-full transition-all", color), style: { width: pct + "%" } })
-      ),
-      sub ? h("span", { className: "text-[11px] text-muted-foreground" }, sub) : null
-    );
+  function metric(value, label, tone) {
+    return h("div", { className: "min-w-0" },
+      h("div", { className: cn("truncate font-courier text-xl leading-tight", tone || "") }, value),
+      h("div", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, label));
   }
 
-  function Metric(value, label, accent) {
-    return h("div", { className: "flex flex-col gap-0.5" },
-      h("span", { className: cn("font-courier text-2xl leading-none", accent || "") }, value),
-      h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, label)
-    );
+  function inputClass(extra) {
+    return cn("border border-border bg-background/50 px-2 py-1 text-xs outline-none focus:border-emerald-500/60", extra || "");
   }
 
-  // ── per-CLI card ─────────────────────────────────────────────────────────
-  function CliCard(props) {
-    var c = props.cli;
-    var lim = c.limits || { hourly: 0, daily: 0, monthly: 0 };
-    var st = useState({ hourly: lim.hourly || 0, daily: lim.daily || 0, monthly: lim.monthly || 0 });
-    var form = st[0], setForm = st[1];
-    var savingSt = useState(false); var saving = savingSt[0], setSaving = savingSt[1];
-    var installSt = useState(false); var installing = installSt[0], setInstalling = installSt[1];
-    var logSt = useState(""); var log = logSt[0], setLog = logSt[1];
+  function selectClass(extra) {
+    return cn("border border-border bg-background/50 px-2 py-1 text-xs outline-none focus:border-emerald-500/60", extra || "");
+  }
 
-    function num(field) {
-      return h("div", { className: "flex flex-col gap-1" },
-        h("label", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, field),
-        h("input", {
-          type: "number", min: 0, value: form[field],
-          onChange: function (e) {
-            var v = parseInt(e.target.value, 10);
-            var next = {}; next[field] = isNaN(v) ? 0 : v;
-            setForm(Object.assign({}, form, next));
-          },
-          className: "w-full border border-border bg-background/40 px-2 py-1 font-courier text-sm outline-none focus:border-emerald-500/60",
-        })
-      );
+  function targetId(row) {
+    return row.type + ":" + row.id;
+  }
+
+  function targetName(row) {
+    return row.name || row.id;
+  }
+
+  function statusFor(row) {
+    if (row.type === "cli") {
+      if (!row.installed) return pill("missing", "neutral");
+      if (row.status === "unauthenticated") return pill("auth needed", "warn");
+      if (row.provider_env && !row.key_count) return pill("key optional", "info");
+      return pill("ready", "ok");
     }
-
-    function saveLimits() {
-      setSaving(true);
-      postJSON("/limits", { id: c.id, hourly: form.hourly, daily: form.daily, monthly: form.monthly })
-        .then(function () { if (props.onChanged) props.onChanged(); })
-        .catch(function () {})
-        .finally(function () { setSaving(false); });
+    if (row.type === "provider") {
+      if (row.cooling_down) return pill("cooldown", "warn");
+      return row.authed ? pill("ready", "ok") : pill(row.auth === "oauth" ? "login" : "no key", "neutral");
     }
-
-    function doInstall(manager) {
-      setInstalling(true); setLog("starting…");
-      postJSON("/install", { id: c.id, manager: manager })
-        .then(function () {
-          var poll = setInterval(function () {
-            getJSON("/install/status?id=" + encodeURIComponent(c.id))
-              .then(function (s) {
-                setLog(s.log || "");
-                if (!s.running) {
-                  clearInterval(poll);
-                  setInstalling(false);
-                  if (props.onChanged) props.onChanged();
-                }
-              })
-              .catch(function () { clearInterval(poll); setInstalling(false); });
-          }, 1500);
-        })
-        .catch(function (e) { setInstalling(false); setLog("install failed: " + e); });
-    }
-
-    var dayCap = lim.daily || 0;
-    var dayUse = (c.usage && c.usage.day) || 0;
-    var dayPct = dayCap > 0 ? Math.round((100 * dayUse) / dayCap) : 0;
-
-    return h(C.Card, { className: "flex flex-col" },
-      h(C.CardHeader, { className: "pb-2" },
-        h("div", { className: "flex items-start justify-between gap-2" },
-          h("div", { className: "flex flex-col gap-1" },
-            h(C.CardTitle, { className: "text-base font-courier" }, c.name),
-            h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, c.category),
-            c.plan ? h("span", { className: "text-[11px] text-emerald-400/80" }, c.plan) : null
-          ),
-          h("div", { className: "flex flex-col items-end gap-1" },
-            StatusBadge(c.status, c.auth),
-            c.worker ? h("span", {
-              className: "inline-flex items-center border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-courier uppercase tracking-wider text-emerald-300",
-            }, "worker #" + c.worker_rank) : null
-          )
-        )
-      ),
-      h(C.CardContent, { className: "flex flex-col gap-3 text-sm" },
-        // identity line
-        h("div", { className: "flex flex-col gap-0.5 font-courier text-xs text-muted-foreground" },
-          h("span", null, "$ " + c.bin + (c.version ? "  ·  " + c.version : "")),
-          c.path ? h("span", { className: "truncate" }, c.path) : h("span", null, "not on PATH")
-        ),
-        // auth line
-        c.auth_supported
-          ? h("div", { className: "text-xs" },
-              "Auth: ",
-              h("span", {
-                className: c.auth === "authenticated" ? "text-emerald-400" : "text-amber-400",
-              }, c.auth)
-            )
-          : null,
-
-        // usage vs daily cap
-        c.installed
-          ? Gauge(dayPct, "Daily usage", dayUse + (dayCap ? " / " + dayCap : " (no cap)") + " calls today" +
-              (dayCap && dayPct >= 100 ? "  ⚠ OVER CAP" : ""))
-          : null,
-
-        // limit inputs
-        c.installed
-          ? h("div", { className: "flex flex-col gap-2 border-t border-border pt-3" },
-              h("div", { className: "grid grid-cols-3 gap-2" }, num("hourly"), num("daily"), num("monthly")),
-              h("button", {
-                onClick: saveLimits, disabled: saving,
-                className: "self-start border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 cursor-pointer",
-              }, saving ? "Saving…" : "Save limits")
-            )
-          : // install actions
-            h("div", { className: "flex flex-col gap-2 border-t border-border pt-3" },
-              (c.install_managers && c.install_managers.length)
-                ? h("div", { className: "flex flex-wrap gap-2" },
-                    c.install_managers.map(function (mgr) {
-                      return h("button", {
-                        key: mgr, onClick: function () { doInstall(mgr); }, disabled: installing,
-                        className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 disabled:opacity-50 cursor-pointer",
-                      }, installing ? "Installing…" : "Install via " + mgr);
-                    })
-                  )
-                : h("span", { className: "text-xs text-muted-foreground" }, "No installer registered"),
-              log ? h("pre", {
-                className: "max-h-32 overflow-auto whitespace-pre-wrap border border-border bg-black/40 p-2 font-courier text-[10px] text-emerald-300",
-              }, log) : null
-            ),
-
-        c.docs ? h("a", {
-          href: c.docs, target: "_blank", rel: "noreferrer",
-          className: "text-[11px] text-muted-foreground underline hover:text-foreground",
-        }, "docs ↗") : null
-      )
-    );
+    return row.configured ? pill("ready", "ok") : pill(row.needs_key ? "no key" : "not installed", "neutral");
   }
 
-  // ── orchestration routing manager ────────────────────────────────────────
-  var DEFAULT_INTENTS = [
-    "Frontend / UI", "Backend / API", "Version Control", "Security Review",
-    "Testing", "Docs", "Refactor", "Research",
-  ];
+  function buildTargets(clis, providers, media) {
+    var rows = [];
+    (clis || []).forEach(function (c) {
+      rows.push(Object.assign({}, c, {
+        type: "cli",
+        isLocal: c.id === "ollama" || c.category === "Local Models",
+        isDeprecated: !!c.deprecated,
+        useCases: c.worker ? ["coding", "research", "docs", "automation", "other"] : ["coding", "other"],
+        routeMode: "cli",
+      }));
+    });
+    (providers || []).forEach(function (p) {
+      rows.push(Object.assign({}, p, {
+        type: "provider",
+        isLocal: p.id === "custom" || p.tier === "local",
+        isDeprecated: false,
+        useCases: ["chat", "research", "docs", "automation", "other"],
+        routeMode: "model",
+      }));
+    });
+    (media || []).forEach(function (m) {
+      var uc = ["other"];
+      if (m.category === "Image") uc = ["image", "other"];
+      else if (m.category === "Video") uc = ["video", "other"];
+      else if (m.category === "Voice / TTS" || m.category === "Speech-to-Text" || m.category === "Music") uc = ["audio", "other"];
+      rows.push(Object.assign({}, m, {
+        type: "media",
+        isLocal: false,
+        isDeprecated: false,
+        useCases: uc,
+        routeMode: "media",
+      }));
+    });
+    rows.sort(function (a, b) {
+      if (!!a.isLocal !== !!b.isLocal) return a.isLocal ? 1 : -1;
+      if (!!a.isDeprecated !== !!b.isDeprecated) return a.isDeprecated ? 1 : -1;
+      var ar = a.installed || a.authed || a.configured ? 0 : 1;
+      var br = b.installed || b.authed || b.configured ? 0 : 1;
+      if (ar !== br) return ar - br;
+      return targetName(a).localeCompare(targetName(b));
+    });
+    return rows;
+  }
 
-  function RoutingManager(props) {
-    var rulesSt = useState(props.rules || []);
-    var rules = rulesSt[0], setRules = rulesSt[1];
-    var savingSt = useState(false); var saving = savingSt[0], setSaving = savingSt[1];
+  function KeyInput(props) {
+    var item = props.item;
+    var endpoint = props.endpoint;
+    var envs = item.env ? (Array.isArray(item.env) ? item.env : [item.env]) : [];
+    if (!envs.length && item.provider_env) envs = [item.provider_env];
+    var env = envs[0] || "";
+    var valueSt = useState(""); var value = valueSt[0], setValue = valueSt[1];
+    var appendSt = useState(true); var append = appendSt[0], setAppend = appendSt[1];
+    var busySt = useState(false); var busy = busySt[0], setBusy = busySt[1];
     var savedSt = useState(false); var saved = savedSt[0], setSaved = savedSt[1];
-
-    useEffect(function () { setRules(props.rules || []); }, [props.rules]);
-
-    var cliOptions = (props.clis || []).map(function (c) { return c.id; });
-
-    function update(i, key, val) {
-      var next = rules.slice();
-      next[i] = Object.assign({}, next[i], (function () { var o = {}; o[key] = val; return o; })());
-      setRules(next); setSaved(false);
-    }
-    function addRow() { setRules(rules.concat([{ intent: "", cli: cliOptions[0] || "" }])); setSaved(false); }
-    function removeRow(i) { var n = rules.slice(); n.splice(i, 1); setRules(n); setSaved(false); }
+    if (!env) return h("span", { className: "text-xs text-muted-foreground" }, "No key required");
     function save() {
-      setSaving(true);
-      postJSON("/routing", { rules: rules.filter(function (r) { return r.intent && r.cli; }) })
-        .then(function () { setSaved(true); })
+      if (!value.trim()) return;
+      setBusy(true); setSaved(false);
+      postJSON(endpoint, { env: env, value: value.trim(), append: append })
+        .then(function () { setValue(""); setSaved(true); if (props.onChanged) props.onChanged(); })
         .catch(function () {})
-        .finally(function () { setSaving(false); });
+        .finally(function () { setBusy(false); });
+    }
+    return h("div", { className: "flex min-w-[260px] flex-col gap-1" },
+      h("div", { className: "flex items-center gap-2" },
+        h("input", {
+          type: "password",
+          value: value,
+          placeholder: env,
+          onChange: function (e) { setValue(e.target.value); setSaved(false); },
+          className: inputClass("min-w-0 flex-1 font-courier"),
+        }),
+        h("button", {
+          onClick: save,
+          disabled: busy || !value.trim(),
+          className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-xs font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40",
+        }, busy ? "..." : saved ? "saved" : "save")
+      ),
+      h("label", { className: "flex items-center gap-2 text-[11px] text-muted-foreground" },
+        h("input", {
+          type: "checkbox",
+          checked: append,
+          onChange: function (e) { setAppend(e.target.checked); },
+        }),
+        "append as another slot"));
+  }
+
+  function CopyCode(props) {
+    var copiedSt = useState(false); var copied = copiedSt[0], setCopied = copiedSt[1];
+    var text = props.text || "";
+    function copy() {
+      try {
+        navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(function () { setCopied(false); }, 1200);
+      } catch (e) {}
+    }
+    return h("div", { className: "flex items-stretch gap-1" },
+      h("code", {
+        className: "min-w-0 flex-1 select-all overflow-x-auto whitespace-pre border border-border bg-background/40 px-2 py-1 font-courier text-[11px] text-muted-foreground",
+      }, text),
+      h("button", {
+        onClick: copy,
+        className: "shrink-0 border border-border px-2 text-[11px] font-courier hover:bg-foreground/10",
+      }, copied ? "✓" : "copy"));
+  }
+
+  function stepRow(n, title, tone, body) {
+    return h("div", { className: "flex gap-2" },
+      h("div", {
+        className: cn("flex h-5 w-5 shrink-0 items-center justify-center border font-courier text-[10px]",
+          tone || "border-border text-muted-foreground"),
+      }, n),
+      h("div", { className: "flex min-w-0 flex-1 flex-col gap-1" },
+        h("div", { className: "font-courier text-[11px] text-foreground" }, title),
+        body));
+  }
+
+  // "Get help from AI" — routes the install question through a governed worker
+  // CLI (codex/claude/qwen/opencode, or Ollama floor) via /install/assist.
+  function AiHelp(props) {
+    var openSt = useState(false); var open = openSt[0], setOpen = openSt[1];
+    var busySt = useState(false); var busy = busySt[0], setBusy = busySt[1];
+    var ansSt = useState(null); var ans = ansSt[0], setAns = ansSt[1];
+    function ask() {
+      setBusy(true); setOpen(true); setAns(null);
+      postJSON("/install/assist", {
+        id: props.row.id,
+        manager: props.manager || "",
+        log: props.log || "",
+        question: props.question || "",
+      })
+        .then(function (res) { setAns(res || { ok: false, text: "No response" }); })
+        .catch(function (e) { setAns({ ok: false, text: "Failed: " + e }); })
+        .finally(function () { setBusy(false); });
+    }
+    return h("div", { className: "flex flex-col gap-1" },
+      h("button", {
+        onClick: ask,
+        disabled: busy,
+        className: "self-start border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] font-courier text-sky-300 hover:bg-sky-500/20 disabled:opacity-40",
+      }, busy ? "asking AI…" : (props.label || "Ask AI for help")),
+      open && ans ? h("div", { className: "flex flex-col gap-1 border border-sky-500/30 bg-sky-500/5 p-2" },
+        h("div", { className: "flex items-center justify-between" },
+          h("span", { className: "text-[10px] uppercase tracking-wider text-sky-300" },
+            "AI" + (ans.worker ? " · via " + ans.worker : "")),
+          h("button", {
+            onClick: function () { setOpen(false); },
+            className: "text-[11px] text-muted-foreground hover:text-foreground",
+          }, "hide")),
+        h("pre", {
+          className: "max-h-72 overflow-auto whitespace-pre-wrap font-courier text-[11px] text-muted-foreground",
+        }, ans.text || "")) : null);
+  }
+
+  function InstallStepper(props) {
+    var row = props.row;
+    var onChanged = props.onChanged;
+    var options = (row.install_options && row.install_options.length)
+      ? row.install_options
+      : (row.install_managers || []).map(function (m) {
+          return { manager: m, label: m, command: "", executable: true, platforms: [] };
+        });
+    var runnable = options.filter(function (o) { return o.executable; });
+    var initial = (runnable[0] || options[0] || {}).manager || "";
+    var mgrSt = useState(initial); var mgr = mgrSt[0], setMgr = mgrSt[1];
+    var installingSt = useState(false); var installing = installingSt[0], setInstalling = installingSt[1];
+    var logSt = useState(""); var log = logSt[0], setLog = logSt[1];
+    var doneSt = useState(false); var done = doneSt[0], setDone = doneSt[1];
+    var opt = options.filter(function (o) { return o.manager === mgr; })[0] || options[0] || {};
+
+    useEffect(function () {
+      if (!installing) return undefined;
+      var active = true;
+      var timer = setInterval(function () {
+        getJSON("/install/status?id=" + encodeURIComponent(row.id)).then(function (s) {
+          if (!active) return;
+          if (s.log) setLog(s.log);
+          if (s.installed) setDone(true);
+          if (!s.running) setInstalling(false);
+        }).catch(function () {});
+      }, 2000);
+      return function () { active = false; clearInterval(timer); };
+    }, [installing, row.id]);
+
+    function startInstall() {
+      if (!opt.executable) return;
+      setDone(false);
+      setLog("$ " + (opt.command || "") + "\n\nstarting…");
+      setInstalling(true);
+      postJSON("/install", { id: row.id, manager: mgr }).catch(function (e) {
+        setLog("could not start install: " + e);
+        setInstalling(false);
+      });
     }
 
+    if (!options.length) {
+      return h("div", { className: "flex min-w-[240px] flex-col gap-2" },
+        h("span", { className: "text-xs text-muted-foreground" }, "No installer registered."),
+        row.docs ? h("a", { href: row.docs, target: "_blank", rel: "noreferrer",
+          className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "setup docs") : null,
+        h(AiHelp, { row: row }));
+    }
+
+    // Prerequisite step for the selected manager.
+    var prereqBody;
+    if (opt.prereq && opt.prereq_ok === false) {
+      prereqBody = h("div", { className: "flex flex-col gap-1" },
+        h("span", { className: "text-[11px] text-amber-300" }, "Needs " + opt.prereq + " — not found on PATH."),
+        opt.prereq_check ? h(CopyCode, { text: opt.prereq_check }) : null,
+        opt.prereq_get ? h("a", { href: opt.prereq_get, target: "_blank", rel: "noreferrer",
+          className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "get " + opt.prereq) : null);
+    } else if (opt.prereq && opt.prereq_ok === true) {
+      prereqBody = h("span", { className: "text-[11px] text-emerald-300" }, opt.prereq + " detected ✓");
+    } else if (opt.prereq) {
+      prereqBody = h("span", { className: "text-[11px] text-muted-foreground" }, "Uses " + opt.prereq + ".");
+    } else {
+      prereqBody = h("span", { className: "text-[11px] text-muted-foreground" }, "No prerequisite.");
+    }
+
+    var prereqTone = opt.prereq_ok === false ? "border-amber-500/50 text-amber-300"
+      : opt.prereq_ok === true ? "border-emerald-500/50 text-emerald-300" : null;
+
+    return h("div", { className: "flex min-w-[300px] max-w-[380px] flex-col gap-3" },
+      // Manager picker
+      options.length > 1 ? h("div", { className: "flex flex-wrap gap-1" }, options.map(function (o) {
+        return h("button", {
+          key: o.manager,
+          onClick: function () { setMgr(o.manager); },
+          title: o.command || o.label,
+          className: cn("border px-2 py-1 text-[11px] font-courier",
+            o.manager === mgr ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200" : "border-border text-muted-foreground hover:bg-foreground/10",
+            o.executable ? "" : "opacity-60"),
+        }, o.label + (o.executable ? "" : " (other OS)"));
+      })) : null,
+
+      stepRow("1", "Prerequisite", prereqTone, prereqBody),
+
+      stepRow("2", "Install", done ? "border-emerald-500/50 text-emerald-300" : null,
+        h("div", { className: "flex flex-col gap-1" },
+          opt.command ? h(CopyCode, { text: opt.command }) : null,
+          !opt.executable && opt.platforms && opt.platforms.length
+            ? h("span", { className: "text-[11px] text-amber-300" }, "Command is for " + opt.platforms.join(", ") + " — copy & run it there.")
+            : h("div", { className: "flex items-center gap-2" },
+                h("button", {
+                  onClick: startInstall,
+                  disabled: installing || done,
+                  className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40",
+                }, done ? "installed ✓" : installing ? "installing…" : "Install now"),
+                installing ? h("span", { className: "text-[11px] text-muted-foreground" }, "running — logs below") : null),
+          log ? h("pre", {
+            className: "max-h-40 overflow-auto whitespace-pre-wrap border border-border bg-background/40 p-2 font-courier text-[10px] text-muted-foreground",
+          }, log) : null)),
+
+      (row.auth_command || row.auth_hint)
+        ? stepRow("3", "Authenticate", null, h("div", { className: "flex flex-col gap-1" },
+            row.auth_command ? h(CopyCode, { text: row.auth_command }) : null,
+            row.auth_hint ? h("span", { className: "text-[11px] text-muted-foreground" }, row.auth_hint) : null))
+        : null,
+
+      stepRow(row.auth_command || row.auth_hint ? "4" : "3", "Verify", null,
+        h("button", {
+          onClick: onChanged,
+          className: "self-start border border-border px-2 py-1 text-[11px] font-courier hover:bg-foreground/10",
+        }, "Re-scan")),
+
+      h("div", { className: "flex flex-wrap items-center gap-2 border-t border-border/60 pt-2" },
+        h(AiHelp, { row: row, manager: mgr, log: log }),
+        row.docs ? h("a", { href: row.docs, target: "_blank", rel: "noreferrer",
+          className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "setup docs") : null));
+  }
+
+  function CliConfigure(props) {
+    var row = props.row;
+    var onChanged = props.onChanged;
+    if (!row.installed) {
+      return h(InstallStepper, { row: row, onChanged: onChanged });
+    }
+    return h("div", { className: "flex min-w-[260px] flex-col gap-2" },
+      row.auth !== "authenticated" && (row.auth_command || row.auth_hint)
+        ? h("div", { className: "flex flex-col gap-1 border border-amber-500/30 bg-amber-500/10 p-2" },
+            h("div", { className: "text-[11px] uppercase tracking-wider text-amber-300" }, "Auth required"),
+            row.auth_command ? h(CopyCode, { text: row.auth_command }) : null,
+            row.auth_hint ? h("div", { className: "text-[11px] text-muted-foreground" }, row.auth_hint) : null)
+        : null,
+      row.provider_env
+        ? h(KeyInput, { item: { env: [row.provider_env] }, endpoint: "/providers/key", onChanged: onChanged })
+        : null,
+      row.docs ? h("a", {
+          href: row.docs,
+          target: "_blank",
+          rel: "noreferrer",
+          className: "text-[11px] text-muted-foreground underline hover:text-foreground",
+        }, "setup docs") : null,
+      h("div", { className: "flex flex-wrap items-center gap-2" },
+        h("button", {
+          onClick: onChanged,
+          className: "self-start border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10",
+        }, "verify"),
+        (row.auth !== "authenticated" && (row.auth_command || row.auth_hint))
+          ? h(AiHelp, { row: row, question: "I ran the install but authentication isn't working. How do I complete auth and verify it?" })
+          : null),
+      !row.provider_env && row.auth === "authenticated"
+        ? h("span", { className: "text-xs text-muted-foreground" }, "Ready")
+        : null);
+  }
+
+  function MatrixTable(props) {
+    var useCase = props.useCase;
+    var rows = (props.targets || []).filter(function (t) { return t.useCases.indexOf(useCase) >= 0; });
+    var route = (props.routes || []).filter(function (r) { return r.use_case === useCase; })[0] || {
+      use_case: useCase,
+      mode: (props.useCaseDef && props.useCaseDef.default_mode) || "model",
+      target: rows[0] ? targetId(rows[0]) : "",
+      fallback: rows[1] ? targetId(rows[1]) : "",
+      enabled: true,
+    };
+    var capSt = useState({});
+    var caps = capSt[0], setCaps = capSt[1];
+    var routeBusySt = useState(false); var routeBusy = routeBusySt[0], setRouteBusy = routeBusySt[1];
+    var routeSavedSt = useState(false); var routeSaved = routeSavedSt[0], setRouteSaved = routeSavedSt[1];
+    var msgSt = useState(""); var msg = msgSt[0], setMsg = msgSt[1];
+
+    function saveRoute(patch) {
+      var nextRoute = Object.assign({}, route, patch || {});
+      var found = false;
+      var next = (props.routes || []).map(function (r) {
+        if (r.use_case === useCase) {
+          found = true;
+          return nextRoute;
+        }
+        return r;
+      });
+      if (!found) next.push(nextRoute);
+      setRouteBusy(true); setRouteSaved(false);
+      return postJSON("/use-cases", { routes: next })
+        .then(function (res) {
+          setRouteSaved(true); setMsg("Route saved");
+          if (props.onRoutesChanged) props.onRoutesChanged((res && res.routes) || next);
+        })
+        .catch(function (e) { setMsg("Route failed: " + e); })
+        .finally(function () { setRouteBusy(false); });
+    }
+
+    function capValue(row, field) {
+      var key = targetId(row) + ":" + field;
+      if (caps[key] !== undefined) return caps[key];
+      return ((row.limits || {})[field]) || "";
+    }
+    function setCap(row, field, value) {
+      var key = targetId(row) + ":" + field;
+      var next = {}; next[key] = value;
+      setCaps(Object.assign({}, caps, next));
+    }
+    function saveCaps(row) {
+      postJSON("/limits", {
+        id: targetId(row),
+        hourly: parseInt(capValue(row, "hourly"), 10) || 0,
+        daily: parseInt(capValue(row, "daily"), 10) || 0,
+        monthly: parseInt(capValue(row, "monthly"), 10) || 0,
+      }).then(function () { setMsg("Limits saved for " + targetName(row)); if (props.onChanged) props.onChanged(); })
+        .catch(function (e) { setMsg("Limit save failed: " + e); });
+    }
     return h(C.Card, null,
       h(C.CardHeader, { className: "pb-2" },
-        h("div", { className: "flex items-center justify-between" },
-          h(C.CardTitle, { className: "text-base font-courier" }, "Orchestration Matrix"),
-          h("span", { className: "text-[11px] text-muted-foreground" }, "intent → local CLI")
-        )
-      ),
-      h(C.CardContent, { className: "flex flex-col gap-2" },
-        rules.length === 0
-          ? h("p", { className: "text-xs text-muted-foreground" }, "No routing rules yet. Map an agent intent to a worker CLI.")
-          : rules.map(function (r, i) {
-              return h("div", { key: i, className: "flex items-center gap-2" },
-                h("input", {
-                  list: "cli-orch-intents", value: r.intent, placeholder: "intent",
-                  onChange: function (e) { update(i, "intent", e.target.value); },
-                  className: "flex-1 border border-border bg-background/40 px-2 py-1 font-courier text-xs outline-none focus:border-emerald-500/60",
-                }),
-                h("span", { className: "text-muted-foreground" }, "→"),
-                h("select", {
-                  value: r.cli,
-                  onChange: function (e) { update(i, "cli", e.target.value); },
-                  className: "border border-border bg-background/40 px-2 py-1 font-courier text-xs outline-none focus:border-emerald-500/60",
-                }, cliOptions.map(function (id) { return h("option", { key: id, value: id }, id); })),
-                h("button", {
-                  onClick: function () { removeRow(i); },
-                  className: "border border-border px-2 py-1 text-xs text-muted-foreground hover:text-rose-400 cursor-pointer",
-                }, "✕")
-              );
-            }),
-        h("datalist", { id: "cli-orch-intents" },
-          DEFAULT_INTENTS.map(function (it) { return h("option", { key: it, value: it }); })),
-        h("div", { className: "flex items-center gap-2 pt-1" },
-          h("button", {
-            onClick: addRow,
-            className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer",
-          }, "+ Add rule"),
-          h("button", {
-            onClick: save, disabled: saving,
-            className: "border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 cursor-pointer",
-          }, saving ? "Saving…" : "Save matrix"),
-          saved ? h("span", { className: "text-xs text-emerald-400" }, "saved ✓") : null
-        )
-      )
-    );
-  }
-
-  // ── media & integrations ─────────────────────────────────────────────────
-  function KindBadge(kind) {
-    var m = kind === "native"
-      ? ["Native", "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"]
-      : ["Plugin", "text-sky-400 border-sky-500/40 bg-sky-500/10"];
-    return h("span", {
-      className: cn("inline-flex items-center border px-2 py-0.5 text-[10px] font-courier uppercase tracking-wider", m[1]),
-    }, m[0]);
-  }
-
-  function MediaCard(props) {
-    var mi = props.media;
-    var keySt = useState(""); var key = keySt[0], setKey = keySt[1];
-    var savingSt = useState(false); var saving = savingSt[0], setSaving = savingSt[1];
-    var savedSt = useState(false); var saved = savedSt[0], setSaved = savedSt[1];
-
-    function save() {
-      if (!key.trim() || !mi.env || !mi.env.length) return;
-      setSaving(true); setSaved(false);
-      postJSON("/media/key", { env: mi.env[0], value: key.trim() })
-        .then(function () { setSaved(true); setKey(""); if (props.onChanged) props.onChanged(); })
-        .catch(function () {})
-        .finally(function () { setSaving(false); });
-    }
-
-    return h(C.Card, { className: "flex flex-col" },
-      h(C.CardHeader, { className: "pb-2" },
-        h("div", { className: "flex items-start justify-between gap-2" },
-          h("div", { className: "flex flex-col gap-1" },
-            h(C.CardTitle, { className: "text-sm font-courier" }, mi.name),
-            h("span", { className: "text-[11px] text-muted-foreground" }, mi.mechanism)
-          ),
-          h("div", { className: "flex flex-col items-end gap-1" },
-            KindBadge(mi.kind),
-            mi.configured
-              ? h("span", { className: "text-[10px] text-emerald-400" }, "● configured")
-              : h("span", { className: "text-[10px] text-muted-foreground" }, mi.needs_key ? "○ no key" : "○ not installed")
-          )
-        )
-      ),
-      h(C.CardContent, { className: "flex flex-col gap-2" },
-        mi.needs_key
-          ? h("div", { className: "flex items-center gap-2" },
+        h("div", { className: "flex flex-col gap-3" },
+          h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
+          h(C.CardTitle, { className: "font-courier text-base" }, (USE_CASE_NAMES[useCase] || useCase) + " matrix"),
+          h("div", { className: "flex items-center gap-2" },
+            pill(rows.filter(function (r) {
+              if (r.type === "cli") return r.installed && r.status !== "unauthenticated";
+              return r.authed || r.configured;
+            }).length + "/" + rows.length + " ready", "info"),
+            routeSaved ? pill("route saved", "ok") : null,
+            msg ? h("span", { className: "text-xs text-muted-foreground" }, msg) : null,
+            h("button", {
+              onClick: props.onChanged,
+              className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10",
+            }, "Re-scan"))),
+          h("div", { className: "grid grid-cols-1 gap-2 md:grid-cols-[120px_1fr_1fr_auto] md:items-center" },
+            h("select", {
+              value: route.mode || "model",
+              onChange: function (e) { saveRoute({ mode: e.target.value }); },
+              className: selectClass("font-courier"),
+            }, ["cli", "model", "media"].map(function (m) { return h("option", { key: m, value: m }, m); })),
+            h("select", {
+              value: route.target || "",
+              onChange: function (e) { saveRoute({ target: e.target.value }); },
+              className: selectClass("w-full"),
+            }, [h("option", { key: "", value: "" }, "Primary target")].concat(rows.map(function (t) {
+              return h("option", { key: targetId(t), value: targetId(t) }, t.type + " / " + targetName(t));
+            }))),
+            h("select", {
+              value: route.fallback || "",
+              onChange: function (e) { saveRoute({ fallback: e.target.value }); },
+              className: selectClass("w-full"),
+            }, [h("option", { key: "", value: "" }, "No fallback")].concat(rows.map(function (t) {
+              return h("option", { key: targetId(t), value: targetId(t) }, t.type + " / " + targetName(t));
+            }))),
+            h("label", { className: "flex items-center gap-2 text-xs text-muted-foreground" },
               h("input", {
-                type: "password", value: key, placeholder: mi.env[0],
-                onChange: function (e) { setKey(e.target.value); setSaved(false); },
-                className: "flex-1 border border-border bg-background/40 px-2 py-1 font-courier text-xs outline-none focus:border-emerald-500/60",
+                type: "checkbox",
+                checked: route.enabled !== false,
+                onChange: function (e) { saveRoute({ enabled: e.target.checked }); },
               }),
-              h("button", {
-                onClick: save, disabled: saving || !key.trim(),
-                className: "border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 cursor-pointer",
-              }, saving ? "…" : saved ? "saved ✓" : mi.configured ? "Replace" : "Save")
-            )
-          : h("span", { className: "text-[11px] text-muted-foreground" }, "Local backend — no API key needed."),
-        mi.signup ? h("a", {
-          href: mi.signup, target: "_blank", rel: "noreferrer",
-          className: "text-[11px] text-muted-foreground underline hover:text-foreground",
-        }, mi.needs_key ? "get a key ↗" : "docs ↗") : null
-      )
-    );
+              routeBusy ? "Saving" : "Enabled")))),
+      h(C.CardContent, { className: "overflow-x-auto" },
+        h("table", { className: "w-full min-w-[980px] border-collapse text-sm" },
+          h("thead", null,
+            h("tr", { className: "border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground" },
+              h("th", { className: "py-2 pr-3" }, "Target"),
+              h("th", { className: "py-2 pr-3" }, "Status"),
+              h("th", { className: "py-2 pr-3" }, "Plan / capability"),
+              h("th", { className: "py-2 pr-3" }, "Credential pool"),
+              h("th", { className: "py-2 pr-3" }, "Usage"),
+              h("th", { className: "py-2 pr-3" }, "Limits"),
+              h("th", { className: "py-2 pr-3" }, "Route"),
+              h("th", { className: "py-2" }, "Configure"))),
+          h("tbody", null,
+            rows.map(function (row) {
+              var isCli = row.type === "cli";
+              var isProvider = row.type === "provider";
+              var isMedia = row.type === "media";
+              var slots = row.key_count || 0;
+              var usage = row.usage || {};
+              var source = row.limits && row.limits.source === "custom" ? "custom" : "prefill";
+              var tid = targetId(row);
+              return h("tr", { key: targetId(row), className: "border-b border-border/60 align-top" },
+                h("td", { className: "py-3 pr-3" },
+                  h("div", { className: "flex items-center gap-2" },
+                    pill(row.type, row.type === "cli" ? "ok" : row.type === "provider" ? "info" : "warn"),
+                    row.isDeprecated ? pill("legacy", "warn") : null,
+                    h("div", { className: "min-w-0" },
+                      h("div", { className: "font-courier text-sm" }, targetName(row)),
+                      h("div", { className: "truncate text-[11px] text-muted-foreground" }, row.bin || row.model || row.category || "")))),
+                h("td", { className: "py-3 pr-3" }, statusFor(row)),
+                h("td", { className: "max-w-[280px] py-3 pr-3 text-xs text-muted-foreground" },
+                  row.plan || row.limit || row.mechanism || row.category || ""),
+                h("td", { className: "py-3 pr-3" },
+                  row.env && (Array.isArray(row.env) ? row.env.length : row.env)
+                    ? h("div", { className: "flex flex-col gap-1" },
+                        pill(slots + " slot" + (slots === 1 ? "" : "s"), slots ? "ok" : "neutral"),
+                        h("span", { className: "font-courier text-[11px] text-muted-foreground" },
+                          Array.isArray(row.env) ? row.env.join(", ") : row.env))
+                    : h("span", { className: "text-xs text-muted-foreground" }, "Keyless / local")),
+                h("td", { className: "py-3 pr-3" },
+                  h("div", { className: "flex flex-col gap-0.5 font-courier text-[11px] text-muted-foreground" },
+                    h("span", null, "hour " + (usage.hour || 0) + " / " + capValue(row, "hourly")),
+                    h("span", null, "day " + (usage.day || 0) + " / " + capValue(row, "daily")),
+                    h("span", null, "month " + (usage.month || 0) + " / " + capValue(row, "monthly")))),
+                h("td", { className: "py-3 pr-3" },
+                  h("div", { className: "flex flex-col gap-1" },
+                    h("div", { className: "flex items-center gap-1" },
+                      ["hourly", "daily", "monthly"].map(function (f) {
+                        return h("input", {
+                          key: f,
+                          type: "number",
+                          min: 1,
+                          title: f,
+                          value: capValue(row, f),
+                          onChange: function (e) { setCap(row, f, e.target.value); },
+                          className: inputClass("w-16 font-courier"),
+                        });
+                      }),
+                      h("button", {
+                        onClick: function () { saveCaps(row); },
+                        className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10",
+                      }, "save")),
+                    h("span", { className: "text-[11px] text-muted-foreground" }, source))),
+                h("td", { className: "py-3 pr-3" },
+                  h("div", { className: "flex flex-wrap gap-1" },
+                    route.target === tid ? pill("primary", "ok") : h("button", {
+                      onClick: function () { saveRoute({ target: tid, mode: row.routeMode || route.mode || "model" }); },
+                      disabled: routeBusy,
+                      className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10 disabled:opacity-40",
+                    }, "primary"),
+                    route.fallback === tid ? pill("fallback", "info") : h("button", {
+                      onClick: function () { saveRoute({ fallback: tid }); },
+                      disabled: routeBusy,
+                      className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10 disabled:opacity-40",
+                    }, "fallback"))),
+                h("td", { className: "py-3" },
+                  isCli
+                    ? h(CliConfigure, { row: row, onChanged: props.onChanged })
+                    : isProvider
+                      ? h(KeyInput, { item: row, endpoint: "/providers/key", onChanged: props.onChanged })
+                      : isMedia
+                        ? h(KeyInput, { item: row, endpoint: "/media/key", onChanged: props.onChanged })
+                        : h("span", { className: "text-xs text-muted-foreground" }, "Configured")));
+            })))));
   }
 
-  function MediaPanel() {
+  function App() {
+    var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
     var mediaSt = useState([]); var media = mediaSt[0], setMedia = mediaSt[1];
+    var providersSt = useState([]); var providers = providersSt[0], setProviders = providersSt[1];
+    var healthSt = useState(null); var health = healthSt[0], setHealth = healthSt[1];
+    var useCasesSt = useState([]); var useCases = useCasesSt[0], setUseCases = useCasesSt[1];
+    var routesSt = useState([]); var routes = routesSt[0], setRoutes = routesSt[1];
+    var customLocalSt = useState(false); var customLocal = customLocalSt[0], setCustomLocal = customLocalSt[1];
+    var activeSt = useState("coding"); var active = activeSt[0], setActive = activeSt[1];
     var loadingSt = useState(true); var loading = loadingSt[0], setLoading = loadingSt[1];
+    var errSt = useState(""); var err = errSt[0], setErr = errSt[1];
 
     var load = useCallback(function () {
-      setLoading(true);
-      return getJSON("/media/scan")
-        .then(function (d) { setMedia((d && d.media) || []); })
-        .catch(function () {})
-        .finally(function () { setLoading(false); });
+      setLoading(true); setErr("");
+      return Promise.all([
+        getJSON("/scan"),
+        getJSON("/media/scan"),
+        getJSON("/providers/scan"),
+        getJSON("/health"),
+        getJSON("/use-cases"),
+      ]).then(function (res) {
+        setClis((res[0] && res[0].clis) || []);
+        setMedia((res[1] && res[1].media) || []);
+        setProviders((res[2] && res[2].providers) || []);
+        setHealth(res[3] || null);
+        setUseCases((res[4] && res[4].use_cases) || []);
+        setRoutes((res[4] && res[4].routes) || []);
+        setCustomLocal(!!(res[4] && res[4].show_custom_local));
+      }).catch(function (e) {
+        setErr(String(e));
+      }).finally(function () {
+        setLoading(false);
+      });
     }, []);
+
     useEffect(function () { load(); }, [load]);
 
-    var byCat = {};
-    media.forEach(function (m) { (byCat[m.category] = byCat[m.category] || []).push(m); });
-    var cats = Object.keys(byCat);
-    var configured = media.filter(function (m) { return m.configured; }).length;
+    var targets = buildTargets(clis, providers, media);
+    var selected = (useCases.filter(function (u) { return u.id === active; })[0]) || {};
+    var readyClis = clis.filter(function (c) { return c.installed; }).length;
+    var readyProviders = providers.filter(function (p) { return p.authed; }).length;
+    var readyMedia = media.filter(function (m) { return m.configured; }).length;
+    var keySlots = targets.reduce(function (n, t) { return n + (t.key_count || 0); }, 0);
+    var hasLocal = targets.some(function (t) { return t.isLocal; });
+    function addCustomLocal() {
+      postJSON("/custom-local", { enabled: true }).then(function () {
+        setCustomLocal(true);
+        load();
+      });
+    }
 
-    return h("div", { className: "flex flex-col gap-4 border-t border-border pt-6" },
-      h("div", { className: "flex items-center justify-between" },
-        h("div", { className: "flex items-center gap-3" },
-          h("h3", { className: "font-courier text-sm uppercase tracking-wider text-muted-foreground" }, "Media & Integrations"),
-          media.length ? h(C.Badge, { variant: "outline" }, configured + "/" + media.length + " configured") : null,
-          h("span", { className: "text-[11px] text-muted-foreground" }, "native = Hermes built-in · plugin = needs a backend")
-        ),
-        h("button", {
-          onClick: load,
-          className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer",
-        }, "⟳ Re-scan")
-      ),
-      cats.map(function (cat) {
-        return h("div", { key: cat, className: "flex flex-col gap-2" },
-          h("h4", { className: "font-courier text-xs uppercase tracking-wider text-muted-foreground/70" }, cat),
-          h("div", { className: "grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3" },
-            byCat[cat].map(function (mi) {
-              return h(MediaCard, { key: mi.id, media: mi, onChanged: load });
-            })
-          )
-        );
+    return h("div", { className: "flex flex-col gap-5" },
+      h(C.Card, { className: "border-emerald-500/20" },
+        h(C.CardContent, { className: "flex flex-col gap-4 py-4" },
+          h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
+            h("div", { className: "min-w-0" },
+              h("div", { className: "font-courier text-lg text-emerald-300" }, "CLI Governor"),
+              h("div", { className: "text-xs text-muted-foreground" }, "One matrix per use case: route, fallback, limits, usage, keys, and install actions in the same place.")),
+            h("button", {
+              onClick: load,
+              className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10",
+            }, loading ? "Scanning..." : "Re-scan"),
+            !customLocal && !hasLocal ? h("button", {
+              onClick: addCustomLocal,
+              className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10",
+            }, "Add custom/local") : null),
+          h("div", { className: "grid grid-cols-2 gap-4 md:grid-cols-5" },
+            metric(readyClis + "/" + clis.length, "CLI targets", "text-emerald-300"),
+            metric(readyProviders + "/" + providers.length, "Model providers", "text-sky-300"),
+            metric(readyMedia + "/" + media.length, "Media backends", "text-amber-300"),
+            metric(String(keySlots), "Credential slots", "text-emerald-300"),
+            metric((health && health.active_worker) || "-", "Active worker", "text-muted-foreground")))),
+
+      err ? h(C.Card, { className: "border-rose-500/40" },
+        h(C.CardContent, { className: "py-3 text-sm text-rose-300" }, "Backend error: " + err)) : null,
+
+      h("div", { className: "flex flex-wrap gap-2" },
+        USE_CASE_ORDER.map(function (id) {
+          return h("button", {
+            key: id,
+            onClick: function () { setActive(id); },
+            className: cn("border px-3 py-2 text-sm font-courier", active === id ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200" : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
+          }, USE_CASE_NAMES[id]);
+        })),
+
+      h(C.Card, null,
+        h(C.CardContent, { className: "py-3" },
+          h("div", { className: "font-courier text-sm" }, selected.name || USE_CASE_NAMES[active]),
+          h("div", { className: "mt-1 max-w-4xl text-xs text-muted-foreground" }, selected.description || ""),
+          h("div", { className: "mt-2 text-[11px] text-muted-foreground" }, selected.intent || ""))),
+
+      h(MatrixTable, {
+        useCase: active,
+        useCaseDef: selected,
+        targets: targets,
+        routes: routes,
+        onRoutesChanged: setRoutes,
+        onChanged: load,
       })
     );
   }
 
-  // ── model governor (free-first fallback chain) ────────────────────────────
-  function fmtCooldown(s) {
-    if (!s) return "";
-    var d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), mm = Math.floor((s % 3600) / 60);
-    return d > 0 ? d + "d " + hh + "h" : hh > 0 ? hh + "h " + mm + "m" : mm + "m";
-  }
-  function TierBadge(tier) {
-    var map = {
-      free: ["free", "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"],
-      trial: ["trial", "text-sky-400 border-sky-500/40 bg-sky-500/10"],
-      subscription: ["sub", "text-violet-400 border-violet-500/40 bg-violet-500/10"],
-      cheap: ["cheap", "text-amber-400 border-amber-500/40 bg-amber-500/10"],
-      local: ["local", "text-zinc-400 border-zinc-500/40 bg-zinc-500/10"],
-    };
-    var mm = map[tier] || map.local;
-    return h("span", { className: cn("inline-flex items-center border px-2 py-0.5 text-[10px] font-courier uppercase", mm[1]) }, mm[0]);
-  }
-
-  function ModelGovernorPanel() {
-    var pSt = useState([]); var providers = pSt[0], setProviders = pSt[1];
-    var cSt = useState({ primary: null, fallback: [] }); var chain = cSt[0], setChain = cSt[1];
-    var busySt = useState(false); var busy = busySt[0], setBusy = busySt[1];
-    var load = useCallback(function () {
-      return Promise.all([getJSON("/providers/scan"), getJSON("/providers/chain")])
-        .then(function (r) { setProviders(r[0].providers || []); setChain(r[1] || { primary: null, fallback: [] }); })
-        .catch(function () {});
-    }, []);
-    useEffect(function () { load(); }, [load]);
-
-    function addToChain(p) {
-      var fb = (chain.fallback || []).slice();
-      if (fb.some(function (e) { return e.provider === p.id; })) return;
-      var entry = { provider: p.id, model: p.model };
-      if (p.id === "custom") entry.base_url = "http://localhost:11434/v1";
-      fb.push(entry); setBusy(true);
-      postJSON("/providers/chain", { fallback: fb }).then(load).finally(function () { setBusy(false); });
-    }
-    function removeFromChain(id) {
-      var fb = (chain.fallback || []).filter(function (e) { return e.provider !== id; });
-      setBusy(true);
-      postJSON("/providers/chain", { fallback: fb }).then(load).finally(function () { setBusy(false); });
-    }
-    var primaryProv = chain.primary && chain.primary.provider;
-
-    return h(C.Card, { className: "border-emerald-500/20" },
-      h(C.CardHeader, { className: "pb-2" },
-        h("div", { className: "flex items-center justify-between" },
-          h("div", { className: "flex items-center gap-3" },
-            h(C.CardTitle, { className: "text-base font-courier" }, "Model Governor"),
-            h("span", { className: "text-[11px] text-muted-foreground" }, "free-first fallback — stack many accounts so no single limit stops you")),
-          h("button", { onClick: load, className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer" }, "⟳ Refresh"))),
-      h(C.CardContent, { className: "flex flex-col gap-4" },
-        // active chain
-        h("div", { className: "flex flex-wrap items-center gap-2" },
-          h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "chain →"),
-          primaryProv ? h("span", { className: "inline-flex items-center border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-[11px] font-courier text-violet-300" }, "1. " + primaryProv + " (primary)") : null,
-          (chain.fallback || []).map(function (e, i) {
-            return h("span", { key: e.provider + i, className: "inline-flex items-center gap-1.5 border border-border px-2 py-0.5 text-[11px] font-courier" },
-              (i + 2) + ". " + e.provider,
-              h("button", { onClick: function () { removeFromChain(e.provider); }, className: "text-muted-foreground hover:text-rose-400 cursor-pointer" }, "✕"));
-          })),
-        // registry
-        h("div", { className: "grid grid-cols-1 gap-2 md:grid-cols-2" },
-          providers.map(function (p) {
-            return h("div", { key: p.id, className: "flex items-center justify-between gap-2 border border-border bg-background/30 px-3 py-2" },
-              h("div", { className: "flex flex-col gap-0.5 min-w-0" },
-                h("div", { className: "flex items-center gap-2" },
-                  h("span", { className: "font-courier text-sm truncate" }, p.name), TierBadge(p.tier)),
-                h("div", { className: "flex flex-wrap items-center gap-2 text-[11px]" },
-                  p.authed ? h("span", { className: "text-emerald-400" }, "● authed") : h("span", { className: "text-muted-foreground" }, p.auth === "oauth" ? "○ login" : "○ no key"),
-                  p.position ? h("span", { className: "text-sky-400" }, p.position) : null,
-                  p.cooling_down ? h("span", { className: "text-amber-400" }, "⏳ retry in " + fmtCooldown(p.cooldown_remaining_s)) : null,
-                  h("span", { className: "text-muted-foreground/70" }, p.limit))),
-              h("div", { className: "flex items-center gap-2 shrink-0" },
-                p.signup ? h("a", { href: p.signup, target: "_blank", rel: "noreferrer", className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "get key ↗") : null,
-                p.position ? null : h("button", { onClick: function () { addToChain(p); }, disabled: busy, className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 cursor-pointer" }, "+ chain")));
-          }))));
-  }
-
-  // ── top-level page ───────────────────────────────────────────────────────
-  function CliMatrixPage() {
-    var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
-    var healthSt = useState(null); var health = healthSt[0], setHealth = healthSt[1];
-    var routingSt = useState([]); var routing = routingSt[0], setRouting = routingSt[1];
-    var loadingSt = useState(true); var loading = loadingSt[0], setLoading = loadingSt[1];
-    var errSt = useState(null); var err = errSt[0], setErr = errSt[1];
-
-    var load = useCallback(function () {
-      setLoading(true); setErr(null);
-      return Promise.all([getJSON("/scan"), getJSON("/health"), getJSON("/routing")])
-        .then(function (res) {
-          setClis((res[0] && res[0].clis) || []);
-          setHealth(res[1] || null);
-          setRouting((res[2] && res[2].routing) || []);
-        })
-        .catch(function (e) { setErr(String(e)); })
-        .finally(function () { setLoading(false); });
-    }, []);
-
-    useEffect(function () { load(); }, [load]);
-
-    // group by category
-    var byCat = {};
-    clis.forEach(function (c) { (byCat[c.category] = byCat[c.category] || []).push(c); });
-    var cats = Object.keys(byCat).sort();
-
-    return h("div", { className: "flex flex-col gap-6" },
-      // ── header / metrics bar ──
-      h(C.Card, { className: "border-emerald-500/20" },
-        h(C.CardContent, { className: "flex flex-col gap-4 py-4" },
-          h("div", { className: "flex flex-wrap items-center justify-between gap-4" },
-            h("div", { className: "flex items-center gap-3" },
-              h("span", { className: "font-courier text-lg text-emerald-400" }, "▚ CLI MATRIX"),
-              h(C.Badge, { variant: "outline" }, "v0.1.0"),
-              loading ? h("span", { className: "text-xs text-muted-foreground" }, "scanning…") : null
-            ),
-            h("button", {
-              onClick: load,
-              className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10 cursor-pointer",
-            }, "⟳ Re-scan")
-          ),
-          health ? h("div", { className: "grid grid-cols-2 gap-6 md:grid-cols-5" },
-            Metric(health.workers_installed || 0, "Local CLI workers", "text-emerald-400"),
-            Metric(health.delegations_today || 0, "Delegations today", "text-emerald-400"),
-            h("div", { className: "flex flex-col gap-0.5 min-w-0" },
-              h("span", { className: "font-courier text-lg leading-tight text-emerald-400 truncate" }, health.active_worker || "—"),
-              h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "Active worker")),
-            h("div", { className: "flex flex-col gap-0.5 min-w-0" },
-              h("span", { className: "font-courier text-lg leading-tight truncate" }, health.brain || "—"),
-              h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "Brain (orchestrator)")),
-            h("div", { className: "col-span-2 md:col-span-1" },
-              Gauge(health.daily_budget_used_pct, "Cap margin",
-                health.daily_budget_used_pct >= 90 ? "near a CLI's cap" : "within safe margin"))
-          ) : null,
-          // delegation priority / fallback order
-          (function () {
-            var ws = clis.filter(function (c) { return c.worker; })
-              .sort(function (a, b) { return (a.worker_rank || 99) - (b.worker_rank || 99); });
-            return ws.length ? h("div", { className: "flex flex-wrap items-center gap-2 border-t border-border pt-3" },
-              h("span", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "delegation priority →"),
-              ws.map(function (c, i) {
-                var cap = (c.limits && c.limits.daily) || 0;
-                var over = cap > 0 && c.usage && c.usage.day >= cap;
-                var s = !c.installed
-                  ? ["○ missing", "text-zinc-500 border-zinc-600/40"]
-                  : over ? ["⚠ at cap", "text-amber-400 border-amber-500/40"]
-                         : ["● ready", "text-emerald-400 border-emerald-500/40"];
-                return h("span", { key: c.id,
-                  className: cn("inline-flex items-center gap-1.5 border px-2 py-0.5 text-[11px] font-courier", s[1]) },
-                  (i + 1) + ". " + c.id, h("span", { className: "opacity-70" }, s[0]));
-              })
-            ) : null;
-          })()
-        )
-      ),
-
-      err ? h(C.Card, { className: "border-rose-500/40" },
-        h(C.CardContent, { className: "py-3 text-sm text-rose-400" },
-          "Backend error: " + err + " (is the dashboard running with the plugin loaded?)")) : null,
-
-      // ── model governor (free-first fallback chain) ──
-      h(ModelGovernorPanel, null),
-
-      // ── CLI cards by category ──
-      cats.map(function (cat) {
-        return h("div", { key: cat, className: "flex flex-col gap-3" },
-          h("h3", { className: "font-courier text-sm uppercase tracking-wider text-muted-foreground" }, cat),
-          h("div", { className: "grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3" },
-            byCat[cat].map(function (c) {
-              return h(CliCard, { key: c.id, cli: c, onChanged: load });
-            })
-          )
-        );
-      }),
-
-      // ── routing ──
-      h(RoutingManager, { rules: routing, clis: clis }),
-
-      // ── media & integrations ──
-      h(MediaPanel, null)
-    );
-  }
-
-  window.__HERMES_PLUGINS__.register("cli-orchestrator", CliMatrixPage);
+  window.__HERMES_PLUGINS__.register("cli-orchestrator", App);
 })();
