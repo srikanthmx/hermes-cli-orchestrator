@@ -93,6 +93,9 @@ TRACKED_BINS = {
 }
 # bin name -> catalog id (here they're identical, but keep the indirection)
 _BIN_TO_ID = {v: k for k, v in TRACKED_BINS.items()}
+# Alternate command names some tools ship under (mirrors dashboard alt_bins).
+# Antigravity installs its CLI as `antigravity-ide`, not `antigravity`.
+_BIN_TO_ID["antigravity-ide"] = "antigravity"
 
 
 def _hermes_home() -> Path:

@@ -119,7 +119,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "id": "antigravity", "name": "Antigravity CLI", "category": "AI Coding",
-        "bin": "antigravity", "version_args": ["--version"], "auth": None,
+        "bin": "antigravity", "alt_bins": ["antigravity-ide"],
+        "version_args": ["--version"], "auth": None,
         "auth_command": "antigravity",
         "auth_hint": "Run Antigravity once after install and complete Google's interactive sign-in when prompted.",
         "install": {
@@ -604,6 +605,17 @@ def _install_options(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     return options
 
 
+def _resolve_bin(entry: Dict[str, Any]) -> Optional[str]:
+    """Return the binary name that actually resolves on PATH for this entry,
+    trying the primary ``bin`` then any ``alt_bins`` (some tools ship under a
+    different command name, e.g. Antigravity installs as ``antigravity-ide``).
+    Broken symlinks are skipped because shutil.which() ignores them."""
+    for name in [entry.get("bin")] + list(entry.get("alt_bins") or []):
+        if name and shutil.which(name):
+            return name
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -624,8 +636,9 @@ async def scan():
     verified_set = set(state.get("verified", []))
     rows: List[Dict[str, Any]] = []
     for c in catalog:
-        binary = c["bin"]
-        path = shutil.which(binary)
+        resolved = _resolve_bin(c)
+        binary = resolved or c["bin"]
+        path = shutil.which(binary) if resolved else None
         installed = path is not None
         if c.get("hide_when_missing") and not installed:
             continue
