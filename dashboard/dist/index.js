@@ -126,6 +126,9 @@
     }, busy ? "…" : (isVerified ? "verified ✓" : "mark verified"));
   }
 
+  // A CLI or model can serve any text-oriented category, not just coding.
+  var TEXT_CATS = ["coding", "chat", "research", "docs", "automation", "other"];
+
   function buildTargets(clis, providers, media) {
     var rows = [];
     (clis || []).forEach(function (c) {
@@ -133,7 +136,7 @@
         type: "cli",
         isLocal: c.id === "ollama" || c.category === "Local Models",
         isDeprecated: !!c.deprecated,
-        useCases: c.worker ? ["coding", "research", "docs", "automation", "other"] : ["coding", "other"],
+        useCases: TEXT_CATS.slice(),
         routeMode: "cli",
       }));
     });
@@ -142,7 +145,7 @@
         type: "provider",
         isLocal: p.id === "custom" || p.tier === "local",
         isDeprecated: false,
-        useCases: ["chat", "research", "docs", "automation", "other"],
+        useCases: TEXT_CATS.slice(),
         routeMode: "model",
       }));
     });
@@ -433,42 +436,13 @@
         : null);
   }
 
-  function MatrixTable(props) {
-    var useCase = props.useCase;
-    var rows = (props.targets || []).filter(function (t) { return t.useCases.indexOf(useCase) >= 0; });
-    var route = (props.routes || []).filter(function (r) { return r.use_case === useCase; })[0] || {
-      use_case: useCase,
-      mode: (props.useCaseDef && props.useCaseDef.default_mode) || "model",
-      target: rows[0] ? targetId(rows[0]) : "",
-      fallback: rows[1] ? targetId(rows[1]) : "",
-      enabled: true,
-    };
-    var capSt = useState({});
-    var caps = capSt[0], setCaps = capSt[1];
-    var routeBusySt = useState(false); var routeBusy = routeBusySt[0], setRouteBusy = routeBusySt[1];
-    var routeSavedSt = useState(false); var routeSaved = routeSavedSt[0], setRouteSaved = routeSavedSt[1];
+  // ── Single, unified backend config (CLIs + models + media in ONE place) ──
+  // Configure a backend once here; category routing below just references it.
+  function BackendsConfig(props) {
+    var targets = props.targets || [];
+    var capSt = useState({}); var caps = capSt[0], setCaps = capSt[1];
     var msgSt = useState(""); var msg = msgSt[0], setMsg = msgSt[1];
-
-    function saveRoute(patch) {
-      var nextRoute = Object.assign({}, route, patch || {});
-      var found = false;
-      var next = (props.routes || []).map(function (r) {
-        if (r.use_case === useCase) {
-          found = true;
-          return nextRoute;
-        }
-        return r;
-      });
-      if (!found) next.push(nextRoute);
-      setRouteBusy(true); setRouteSaved(false);
-      return postJSON("/use-cases", { routes: next })
-        .then(function (res) {
-          setRouteSaved(true); setMsg("Route saved");
-          if (props.onRoutesChanged) props.onRoutesChanged((res && res.routes) || next);
-        })
-        .catch(function (e) { setMsg("Route failed: " + e); })
-        .finally(function () { setRouteBusy(false); });
-    }
+    var filterSt = useState("all"); var filter = filterSt[0], setFilter = filterSt[1];
 
     function capValue(row, field) {
       var key = targetId(row) + ":" + field;
@@ -489,60 +463,40 @@
       }).then(function () { setMsg("Limits saved for " + targetName(row)); if (props.onChanged) props.onChanged(); })
         .catch(function (e) { setMsg("Limit save failed: " + e); });
     }
+
+    var kinds = [["all", "All"], ["cli", "CLIs"], ["provider", "Models"], ["media", "Media"]];
+    var rows = targets.filter(function (t) { return filter === "all" || t.type === filter; });
+
     return h(C.Card, null,
       h(C.CardHeader, { className: "pb-2" },
-        h("div", { className: "flex flex-col gap-3" },
-          h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
-          h(C.CardTitle, { className: "font-courier text-base" }, (USE_CASE_NAMES[useCase] || useCase) + " matrix"),
-          h("div", { className: "flex items-center gap-2" },
-            pill(rows.filter(function (r) {
-              if (r.type === "cli") return r.installed && r.status !== "unauthenticated";
-              return r.authed || r.configured;
-            }).length + "/" + rows.length + " ready", "info"),
-            routeSaved ? pill("route saved", "ok") : null,
+        h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
+          h("div", { className: "min-w-0" },
+            h(C.CardTitle, { className: "font-courier text-base" }, "Backends — configure once"),
+            h("div", { className: "text-[11px] text-muted-foreground" }, "CLIs, models and media in one place. Caps, keys and install live here; routing is per category below.")),
+          h("div", { className: "flex flex-wrap items-center gap-2" },
             msg ? h("span", { className: "text-xs text-muted-foreground" }, msg) : null,
+            h("div", { className: "flex gap-1" }, kinds.map(function (k) {
+              return h("button", {
+                key: k[0], onClick: function () { setFilter(k[0]); },
+                className: cn("border px-2 py-1 text-[11px] font-courier",
+                  filter === k[0] ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200" : "border-border text-muted-foreground hover:bg-foreground/10"),
+              }, k[1]);
+            })),
             h("button", {
               onClick: props.onChanged,
               className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10",
-            }, "Re-scan"))),
-          h("div", { className: "grid grid-cols-1 gap-2 md:grid-cols-[120px_1fr_1fr_auto] md:items-center" },
-            h("select", {
-              value: route.mode || "model",
-              onChange: function (e) { saveRoute({ mode: e.target.value }); },
-              className: selectClass("font-courier"),
-            }, ["cli", "model", "media"].map(function (m) { return h("option", { key: m, value: m }, m); })),
-            h("select", {
-              value: route.target || "",
-              onChange: function (e) { saveRoute({ target: e.target.value }); },
-              className: selectClass("w-full"),
-            }, [h("option", { key: "", value: "" }, "Primary target")].concat(rows.map(function (t) {
-              return h("option", { key: targetId(t), value: targetId(t) }, t.type + " / " + targetName(t));
-            }))),
-            h("select", {
-              value: route.fallback || "",
-              onChange: function (e) { saveRoute({ fallback: e.target.value }); },
-              className: selectClass("w-full"),
-            }, [h("option", { key: "", value: "" }, "No fallback")].concat(rows.map(function (t) {
-              return h("option", { key: targetId(t), value: targetId(t) }, t.type + " / " + targetName(t));
-            }))),
-            h("label", { className: "flex items-center gap-2 text-xs text-muted-foreground" },
-              h("input", {
-                type: "checkbox",
-                checked: route.enabled !== false,
-                onChange: function (e) { saveRoute({ enabled: e.target.checked }); },
-              }),
-              routeBusy ? "Saving" : "Enabled")))),
+            }, "Re-scan")))),
       h(C.CardContent, { className: "overflow-x-auto" },
-        h("table", { className: "w-full min-w-[980px] border-collapse text-sm" },
+        h("table", { className: "w-full min-w-[1040px] border-collapse text-sm" },
           h("thead", null,
             h("tr", { className: "border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground" },
-              h("th", { className: "py-2 pr-3" }, "Target"),
+              h("th", { className: "py-2 pr-3" }, "Backend"),
               h("th", { className: "py-2 pr-3" }, "Status"),
+              h("th", { className: "py-2 pr-3" }, "Serves"),
               h("th", { className: "py-2 pr-3" }, "Plan / capability"),
               h("th", { className: "py-2 pr-3" }, "Credential pool"),
               h("th", { className: "py-2 pr-3" }, "Usage"),
               h("th", { className: "py-2 pr-3" }, "Limits"),
-              h("th", { className: "py-2 pr-3" }, "Route"),
               h("th", { className: "py-2" }, "Configure"))),
           h("tbody", null,
             rows.map(function (row) {
@@ -552,18 +506,23 @@
               var slots = row.key_count || 0;
               var usage = row.usage || {};
               var source = row.limits && row.limits.source === "custom" ? "custom" : "prefill";
-              var tid = targetId(row);
               return h("tr", { key: targetId(row), className: "border-b border-border/60 align-top" },
                 h("td", { className: "py-3 pr-3" },
                   h("div", { className: "flex flex-wrap items-center gap-2" },
-                    pill(row.type, row.type === "cli" ? "ok" : row.type === "provider" ? "info" : "warn"),
+                    pill(row.type, isCli ? "ok" : isProvider ? "info" : "warn"),
                     h(ProvenanceTag, { row: row, onChanged: props.onChanged }),
                     row.isDeprecated ? pill("legacy", "warn") : null,
                     h("div", { className: "min-w-0" },
                       h("div", { className: "font-courier text-sm" }, targetName(row)),
                       h("div", { className: "truncate text-[11px] text-muted-foreground" }, row.bin || row.model || row.category || "")))),
                 h("td", { className: "py-3 pr-3" }, statusFor(row)),
-                h("td", { className: "max-w-[280px] py-3 pr-3 text-xs text-muted-foreground" },
+                h("td", { className: "py-3 pr-3" },
+                  isMedia
+                    ? h("span", { className: "text-[11px] text-muted-foreground" }, row.category || "media")
+                    : h("div", { className: "flex flex-wrap gap-1" }, (row.useCases || []).filter(function (u) { return u !== "other"; }).map(function (u) {
+                        return h("span", { key: u, className: "border border-border bg-background/40 px-1.5 py-0.5 text-[10px] font-courier text-muted-foreground" }, USE_CASE_NAMES[u] || u);
+                      }))),
+                h("td", { className: "max-w-[240px] py-3 pr-3 text-xs text-muted-foreground" },
                   row.plan || row.limit || row.mechanism || row.category || ""),
                 h("td", { className: "py-3 pr-3" },
                   row.env && (Array.isArray(row.env) ? row.env.length : row.env)
@@ -582,10 +541,7 @@
                     h("div", { className: "flex items-center gap-1" },
                       ["hourly", "daily", "monthly"].map(function (f) {
                         return h("input", {
-                          key: f,
-                          type: "number",
-                          min: 1,
-                          title: f,
+                          key: f, type: "number", min: 1, title: f,
                           value: capValue(row, f),
                           onChange: function (e) { setCap(row, f, e.target.value); },
                           className: inputClass("w-16 font-courier"),
@@ -596,18 +552,6 @@
                         className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10",
                       }, "save")),
                     h("span", { className: "text-[11px] text-muted-foreground" }, source))),
-                h("td", { className: "py-3 pr-3" },
-                  h("div", { className: "flex flex-wrap gap-1" },
-                    route.target === tid ? pill("primary", "ok") : h("button", {
-                      onClick: function () { saveRoute({ target: tid, mode: row.routeMode || route.mode || "model" }); },
-                      disabled: routeBusy,
-                      className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10 disabled:opacity-40",
-                    }, "primary"),
-                    route.fallback === tid ? pill("fallback", "info") : h("button", {
-                      onClick: function () { saveRoute({ fallback: tid }); },
-                      disabled: routeBusy,
-                      className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10 disabled:opacity-40",
-                    }, "fallback"))),
                 h("td", { className: "py-3" },
                   isCli
                     ? h(CliConfigure, { row: row, onChanged: props.onChanged })
@@ -617,6 +561,117 @@
                         ? h(KeyInput, { item: row, endpoint: "/media/key", onChanged: props.onChanged })
                         : h("span", { className: "text-xs text-muted-foreground" }, "Configured")));
             })))));
+  }
+
+  // ── Category-wise routing: pick primary + fallback among eligible backends ──
+  function CategoryMatrix(props) {
+    var useCase = props.useCase;
+    var rows = (props.targets || []).filter(function (t) { return t.useCases.indexOf(useCase) >= 0; });
+    var route = (props.routes || []).filter(function (r) { return r.use_case === useCase; })[0] || {
+      use_case: useCase,
+      mode: (props.useCaseDef && props.useCaseDef.default_mode) || "model",
+      target: rows[0] ? targetId(rows[0]) : "",
+      fallback: rows[1] ? targetId(rows[1]) : "",
+      enabled: true,
+    };
+    var routeBusySt = useState(false); var routeBusy = routeBusySt[0], setRouteBusy = routeBusySt[1];
+    var routeSavedSt = useState(false); var routeSaved = routeSavedSt[0], setRouteSaved = routeSavedSt[1];
+    var msgSt = useState(""); var msg = msgSt[0], setMsg = msgSt[1];
+
+    function saveRoute(patch) {
+      var nextRoute = Object.assign({}, route, patch || {});
+      var found = false;
+      var next = (props.routes || []).map(function (r) {
+        if (r.use_case === useCase) { found = true; return nextRoute; }
+        return r;
+      });
+      if (!found) next.push(nextRoute);
+      setRouteBusy(true); setRouteSaved(false);
+      return postJSON("/use-cases", { routes: next })
+        .then(function (res) {
+          setRouteSaved(true); setMsg("Route saved");
+          if (props.onRoutesChanged) props.onRoutesChanged((res && res.routes) || next);
+        })
+        .catch(function (e) { setMsg("Route failed: " + e); })
+        .finally(function () { setRouteBusy(false); });
+    }
+    function optLabel(t) { return t.type + " / " + targetName(t); }
+
+    return h(C.Card, null,
+      h(C.CardHeader, { className: "pb-2" },
+        h("div", { className: "flex flex-col gap-3" },
+          h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
+            h(C.CardTitle, { className: "font-courier text-base" }, (USE_CASE_NAMES[useCase] || useCase) + " routing"),
+            h("div", { className: "flex items-center gap-2" },
+              pill(rows.filter(function (r) {
+                if (r.type === "cli") return r.installed && r.status !== "unauthenticated";
+                return r.authed || r.configured;
+              }).length + "/" + rows.length + " ready", "info"),
+              routeSaved ? pill("route saved", "ok") : null,
+              msg ? h("span", { className: "text-xs text-muted-foreground" }, msg) : null)),
+          h("div", { className: "grid grid-cols-1 gap-2 md:grid-cols-[120px_1fr_1fr_auto] md:items-center" },
+            h("select", {
+              value: route.mode || "model",
+              onChange: function (e) { saveRoute({ mode: e.target.value }); },
+              className: selectClass("font-courier"),
+            }, ["cli", "model", "media"].map(function (m) { return h("option", { key: m, value: m }, m); })),
+            h("select", {
+              value: route.target || "",
+              onChange: function (e) { saveRoute({ target: e.target.value }); },
+              className: selectClass("w-full"),
+            }, [h("option", { key: "", value: "" }, "Primary target")].concat(rows.map(function (t) {
+              return h("option", { key: targetId(t), value: targetId(t) }, optLabel(t));
+            }))),
+            h("select", {
+              value: route.fallback || "",
+              onChange: function (e) { saveRoute({ fallback: e.target.value }); },
+              className: selectClass("w-full"),
+            }, [h("option", { key: "", value: "" }, "No fallback")].concat(rows.map(function (t) {
+              return h("option", { key: targetId(t), value: targetId(t) }, optLabel(t));
+            }))),
+            h("label", { className: "flex items-center gap-2 text-xs text-muted-foreground" },
+              h("input", {
+                type: "checkbox",
+                checked: route.enabled !== false,
+                onChange: function (e) { saveRoute({ enabled: e.target.checked }); },
+              }),
+              routeBusy ? "Saving" : "Enabled")))),
+      h(C.CardContent, { className: "overflow-x-auto" },
+        rows.length === 0
+          ? h("div", { className: "py-4 text-sm text-muted-foreground" }, "No backends serve this category yet — configure one in Backends above.")
+          : h("table", { className: "w-full min-w-[720px] border-collapse text-sm" },
+              h("thead", null,
+                h("tr", { className: "border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground" },
+                  h("th", { className: "py-2 pr-3" }, "Backend"),
+                  h("th", { className: "py-2 pr-3" }, "Status"),
+                  h("th", { className: "py-2 pr-3" }, "Usage (d / m)"),
+                  h("th", { className: "py-2" }, "Route"))),
+              h("tbody", null,
+                rows.map(function (row) {
+                  var tid = targetId(row);
+                  var usage = row.usage || {};
+                  return h("tr", { key: tid, className: "border-b border-border/60 align-top" },
+                    h("td", { className: "py-3 pr-3" },
+                      h("div", { className: "flex flex-wrap items-center gap-2" },
+                        pill(row.type, row.type === "cli" ? "ok" : row.type === "provider" ? "info" : "warn"),
+                        row.isDeprecated ? pill("legacy", "warn") : null,
+                        h("span", { className: "font-courier text-sm" }, targetName(row)))),
+                    h("td", { className: "py-3 pr-3" }, statusFor(row)),
+                    h("td", { className: "py-3 pr-3 font-courier text-[11px] text-muted-foreground" },
+                      (usage.day || 0) + " / " + (usage.month || 0)),
+                    h("td", { className: "py-3" },
+                      h("div", { className: "flex flex-wrap gap-1" },
+                        route.target === tid ? pill("primary", "ok") : h("button", {
+                          onClick: function () { saveRoute({ target: tid, mode: row.routeMode || route.mode || "model" }); },
+                          disabled: routeBusy,
+                          className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10 disabled:opacity-40",
+                        }, "primary"),
+                        route.fallback === tid ? pill("fallback", "info") : h("button", {
+                          onClick: function () { saveRoute({ fallback: tid }); },
+                          disabled: routeBusy,
+                          className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10 disabled:opacity-40",
+                        }, "fallback"))));
+                })))));
   }
 
   function App() {
@@ -676,7 +731,7 @@
           h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
             h("div", { className: "min-w-0" },
               h("div", { className: "font-courier text-lg text-emerald-300" }, "CLI Governor"),
-              h("div", { className: "text-xs text-muted-foreground" }, "One matrix per use case: route, fallback, limits, usage, keys, and install actions in the same place.")),
+              h("div", { className: "text-xs text-muted-foreground" }, "Configure every backend once, then route each category to the best one — with fallback.")),
             h("button", {
               onClick: load,
               className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10",
@@ -695,14 +750,20 @@
       err ? h(C.Card, { className: "border-rose-500/40" },
         h(C.CardContent, { className: "py-3 text-sm text-rose-300" }, "Backend error: " + err)) : null,
 
-      h("div", { className: "flex flex-wrap gap-2" },
-        USE_CASE_ORDER.map(function (id) {
-          return h("button", {
-            key: id,
-            onClick: function () { setActive(id); },
-            className: cn("border px-3 py-2 text-sm font-courier", active === id ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200" : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
-          }, USE_CASE_NAMES[id]);
-        })),
+      // 1) Single, unified config for every backend.
+      h(BackendsConfig, { targets: targets, onChanged: load }),
+
+      // 2) Category-wise routing.
+      h("div", { className: "flex flex-col gap-1" },
+        h("div", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "Route by category"),
+        h("div", { className: "flex flex-wrap gap-2" },
+          USE_CASE_ORDER.map(function (id) {
+            return h("button", {
+              key: id,
+              onClick: function () { setActive(id); },
+              className: cn("border px-3 py-2 text-sm font-courier", active === id ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200" : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
+            }, USE_CASE_NAMES[id]);
+          }))),
 
       h(C.Card, null,
         h(C.CardContent, { className: "py-3" },
@@ -710,7 +771,7 @@
           h("div", { className: "mt-1 max-w-4xl text-xs text-muted-foreground" }, selected.description || ""),
           h("div", { className: "mt-2 text-[11px] text-muted-foreground" }, selected.intent || ""))),
 
-      h(MatrixTable, {
+      h(CategoryMatrix, {
         useCase: active,
         useCaseDef: selected,
         targets: targets,
