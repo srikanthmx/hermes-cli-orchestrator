@@ -683,6 +683,7 @@
     var routesSt = useState([]); var routes = routesSt[0], setRoutes = routesSt[1];
     var customLocalSt = useState(false); var customLocal = customLocalSt[0], setCustomLocal = customLocalSt[1];
     var activeSt = useState("coding"); var active = activeSt[0], setActive = activeSt[1];
+    var viewSt = useState("backends"); var view = viewSt[0], setView = viewSt[1];
     var loadingSt = useState(true); var loading = loadingSt[0], setLoading = loadingSt[1];
     var errSt = useState(""); var err = errSt[0], setErr = errSt[1];
 
@@ -750,35 +751,52 @@
       err ? h(C.Card, { className: "border-rose-500/40" },
         h(C.CardContent, { className: "py-3 text-sm text-rose-300" }, "Backend error: " + err)) : null,
 
-      // 1) Single, unified config for every backend.
-      h(BackendsConfig, { targets: targets, onChanged: load }),
+      // Top-level tabs — Backends (config) first in its own color, Routing next.
+      // Keeps the routing matrix one click away instead of a long scroll.
+      h("div", { className: "flex flex-wrap gap-2" },
+        [["backends", "Backends"], ["routing", "Routing"]].map(function (v) {
+          var isActive = view === v[0];
+          var isBackends = v[0] === "backends";
+          return h("button", {
+            key: v[0],
+            onClick: function () { setView(v[0]); },
+            className: cn("border px-4 py-2 text-sm font-courier",
+              isActive
+                ? (isBackends
+                    ? "border-sky-500/60 bg-sky-500/20 text-sky-200"
+                    : "border-emerald-500/50 bg-emerald-500/15 text-emerald-200")
+                : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
+          }, v[1]);
+        })),
 
-      // 2) Category-wise routing.
-      h("div", { className: "flex flex-col gap-1" },
-        h("div", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "Route by category"),
-        h("div", { className: "flex flex-wrap gap-2" },
-          USE_CASE_ORDER.map(function (id) {
-            return h("button", {
-              key: id,
-              onClick: function () { setActive(id); },
-              className: cn("border px-3 py-2 text-sm font-courier", active === id ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200" : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
-            }, USE_CASE_NAMES[id]);
-          }))),
-
-      h(C.Card, null,
-        h(C.CardContent, { className: "py-3" },
-          h("div", { className: "font-courier text-sm" }, selected.name || USE_CASE_NAMES[active]),
-          h("div", { className: "mt-1 max-w-4xl text-xs text-muted-foreground" }, selected.description || ""),
-          h("div", { className: "mt-2 text-[11px] text-muted-foreground" }, selected.intent || ""))),
-
-      h(CategoryMatrix, {
-        useCase: active,
-        useCaseDef: selected,
-        targets: targets,
-        routes: routes,
-        onRoutesChanged: setRoutes,
-        onChanged: load,
-      })
+      view === "backends"
+        // 1) Single, unified config for every backend.
+        ? h(BackendsConfig, { targets: targets, onChanged: load })
+        // 2) Category-wise routing.
+        : h("div", { className: "flex flex-col gap-5" },
+            h("div", { className: "flex flex-col gap-1" },
+              h("div", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, "Route by category"),
+              h("div", { className: "flex flex-wrap gap-2" },
+                USE_CASE_ORDER.map(function (id) {
+                  return h("button", {
+                    key: id,
+                    onClick: function () { setActive(id); },
+                    className: cn("border px-3 py-2 text-sm font-courier", active === id ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200" : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
+                  }, USE_CASE_NAMES[id]);
+                }))),
+            h(C.Card, null,
+              h(C.CardContent, { className: "py-3" },
+                h("div", { className: "font-courier text-sm" }, selected.name || USE_CASE_NAMES[active]),
+                h("div", { className: "mt-1 max-w-4xl text-xs text-muted-foreground" }, selected.description || ""),
+                h("div", { className: "mt-2 text-[11px] text-muted-foreground" }, selected.intent || ""))),
+            h(CategoryMatrix, {
+              useCase: active,
+              useCaseDef: selected,
+              targets: targets,
+              routes: routes,
+              onRoutesChanged: setRoutes,
+              onChanged: load,
+            }))
     );
   }
 
