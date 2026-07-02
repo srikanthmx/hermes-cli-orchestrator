@@ -115,6 +115,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "install": {"npm": "npm install -g @openai/codex", "brew": "brew install codex"},
         "provider": "openai-codex", "plan": "Subscription (ChatGPT Plus/Pro)",
         "docs": "https://github.com/openai/codex",
+        "verified": True,  # confirmed working as delegation worker + install assist
     },
     {
         "id": "antigravity", "name": "Antigravity CLI", "category": "AI Coding",
@@ -261,6 +262,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "provider": "custom", "plan": "Local / free (offline floor)",
         "hide_when_missing": True,
         "docs": "https://ollama.com",
+        "verified": True,  # confirmed working as free local fallback brain
     },
     # ── Agent host ────────────────────────────────────────────────────────────
     {
@@ -306,7 +308,11 @@ _MANAGER_PREREQ = {
 
 
 def load_catalog() -> List[Dict[str, Any]]:
-    """Default catalog merged with an optional user catalog.json (by id)."""
+    """Default catalog merged with an optional user catalog.json (by id).
+
+    Entries whose id is not part of the built-in catalog are tagged
+    ``_user_added`` so the UI can label them "custom" vs "catalog"."""
+    default_ids = {c["id"] for c in DEFAULT_CATALOG}
     catalog = {c["id"]: dict(c) for c in DEFAULT_CATALOG}
     user_file = state_dir() / "catalog.json"
     if user_file.exists():
@@ -317,7 +323,19 @@ def load_catalog() -> List[Dict[str, Any]]:
                     catalog[c["id"]] = {**catalog.get(c["id"], {}), **c}
         except Exception:
             pass
+    for cid, entry in catalog.items():
+        entry["_user_added"] = cid not in default_ids
     return list(catalog.values())
+
+
+def _provenance(entry: Dict[str, Any], verified_set: set, target_key: str) -> str:
+    """One of 'custom' (user-added), 'verified' (proven working / user-marked),
+    or 'catalog' (known default, not yet verified here)."""
+    if entry.get("_user_added"):
+        return "custom"
+    if entry.get("verified") or target_key in verified_set:
+        return "verified"
+    return "catalog"
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +621,7 @@ async def scan():
     state = read_state()
     limits = state.get("limits", {})
     usage = state.get("usage", {})
+    verified_set = set(state.get("verified", []))
     rows: List[Dict[str, Any]] = []
     for c in catalog:
         binary = c["bin"]
@@ -640,6 +659,9 @@ async def scan():
             "install_options": _install_options(c),
             "install_hint": c.get("install_hint"),
             "docs": c.get("docs"),
+            "provenance": _provenance(c, verified_set, _target_key("cli", c["id"])),
+            "user_added": bool(c.get("_user_added")),
+            "verified_builtin": bool(c.get("verified")),
             "limits": _effective_limits(state, _target_key("cli", c["id"]), _default_limits_for_cli(c), c["id"]),
             "usage": _windows(usage.get(_target_key("cli", c["id"]), usage.get(c["id"], []))),
         })
@@ -706,6 +728,28 @@ async def set_custom_local(body: CustomLocalBody):
     state["show_custom_local"] = bool(body.enabled)
     write_state(state)
     return {"ok": True, "show_custom_local": state["show_custom_local"]}
+
+
+class VerifyBody(BaseModel):
+    id: str            # target key, e.g. "cli:codex"
+    verified: bool = True
+
+
+@router.post("/verify-mark")
+async def verify_mark(body: VerifyBody):
+    """User-toggled 'verified' label. Stored as a set of target keys in state so
+    it survives re-scans; catalog entries with a built-in verified flag are
+    always verified regardless."""
+    state = read_state()
+    marks = set(state.get("verified", []))
+    key = body.id.strip()
+    if body.verified:
+        marks.add(key)
+    else:
+        marks.discard(key)
+    state["verified"] = sorted(marks)
+    write_state(state)
+    return {"ok": True, "verified": state["verified"]}
 
 
 class RoutingRule(BaseModel):

@@ -94,6 +94,38 @@
     return row.configured ? pill("ready", "ok") : pill(row.needs_key ? "no key" : "not installed", "neutral");
   }
 
+  // Provenance label: verified (proven/user-marked) · custom (user-added) ·
+  // catalog (known default). Verified is user-togglable unless built-in.
+  function ProvenanceTag(props) {
+    var row = props.row;
+    var prov = row.provenance;
+    var busySt = useState(false); var busy = busySt[0], setBusy = busySt[1];
+    if (!prov) return null; // only CLI catalog rows carry provenance
+    var isVerified = prov === "verified";
+    var tone = isVerified ? "ok" : prov === "custom" ? "info" : "neutral";
+    var canToggle = !row.verified_builtin && prov !== "custom";
+    function toggle() {
+      setBusy(true);
+      postJSON("/verify-mark", { id: targetId(row), verified: !isVerified })
+        .then(function () { if (props.onChanged) props.onChanged(); })
+        .catch(function () {})
+        .finally(function () { setBusy(false); });
+    }
+    var label = isVerified ? "verified" : prov;
+    if (!canToggle) {
+      return pill(label, tone);
+    }
+    return h("button", {
+      onClick: toggle,
+      disabled: busy,
+      title: isVerified ? "Marked verified — click to unmark" : "Mark verified (tested & works on this machine)",
+      className: cn("inline-flex items-center whitespace-nowrap border px-2 py-0.5 text-[11px] font-courier uppercase disabled:opacity-40",
+        isVerified
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+          : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
+    }, busy ? "…" : (isVerified ? "verified ✓" : "mark verified"));
+  }
+
   function buildTargets(clis, providers, media) {
     var rows = [];
     (clis || []).forEach(function (c) {
@@ -523,8 +555,9 @@
               var tid = targetId(row);
               return h("tr", { key: targetId(row), className: "border-b border-border/60 align-top" },
                 h("td", { className: "py-3 pr-3" },
-                  h("div", { className: "flex items-center gap-2" },
+                  h("div", { className: "flex flex-wrap items-center gap-2" },
                     pill(row.type, row.type === "cli" ? "ok" : row.type === "provider" ? "info" : "warn"),
+                    h(ProvenanceTag, { row: row, onChanged: props.onChanged }),
                     row.isDeprecated ? pill("legacy", "warn") : null,
                     h("div", { className: "min-w-0" },
                       h("div", { className: "font-courier text-sm" }, targetName(row)),
