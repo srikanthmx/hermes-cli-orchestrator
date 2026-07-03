@@ -327,17 +327,21 @@
         disabled: busy,
         className: "self-start border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] font-courier text-sky-300 hover:bg-sky-500/20 disabled:opacity-40",
       }, busy ? "asking AI…" : (props.label || "Ask AI for help")),
-      open && ans ? h("div", { className: "flex flex-col gap-1 border border-sky-500/30 bg-sky-500/5 p-2" },
+      open ? h("div", { className: "flex flex-col gap-1 border border-sky-500/30 bg-sky-500/5 p-2" },
         h("div", { className: "flex items-center justify-between" },
           h("span", { className: "text-[10px] uppercase tracking-wider text-sky-300" },
-            "AI" + (ans.worker ? " · via " + ans.worker : "")),
+            "AI" + (ans && ans.worker ? " · via " + ans.worker : "")),
           h("button", {
             onClick: function () { setOpen(false); },
             className: "text-[11px] text-muted-foreground hover:text-foreground",
           }, "hide")),
-        h("pre", {
-          className: "max-h-72 overflow-auto whitespace-pre-wrap font-courier text-[11px] text-muted-foreground",
-        }, ans.text || "")) : null);
+        busy
+          ? h("div", { className: "flex items-center gap-2 text-[11px] text-muted-foreground" },
+              h("span", { className: "inline-block h-3 w-3 animate-spin border border-sky-400 border-t-transparent" }),
+              "Asking a governed CLI… this can take up to ~90s.")
+          : h("pre", {
+              className: "max-h-72 overflow-auto whitespace-pre-wrap font-courier text-[11px] text-muted-foreground",
+            }, (ans && ans.text) || "")) : null);
   }
 
   function InstallStepper(props) {
@@ -463,14 +467,25 @@
     if (!row.installed) {
       return h(InstallStepper, { row: row, onChanged: onChanged });
     }
+    // "unauthenticated" = detected NOT signed in → nag. "unknown" = we can't
+    // probe this CLI's auth (auth: None), so don't claim it needs auth — it may
+    // already be signed in via its own CLI login (e.g. Antigravity).
+    var needsAuth = row.auth === "unauthenticated";
     return h("div", { className: "flex min-w-[260px] flex-col gap-2" },
-      row.auth !== "authenticated" && (row.auth_command || row.auth_hint)
+      needsAuth && (row.auth_command || row.auth_hint)
         ? h("div", { className: "flex flex-col gap-1 border border-amber-500/30 bg-amber-500/10 p-2" },
             h("div", { className: "text-[11px] uppercase tracking-wider text-amber-300" }, "Auth required"),
             row.auth_command ? h(CopyCode, { text: row.auth_command }) : null,
             row.auth_hint ? h("div", { className: "text-[11px] text-muted-foreground" }, row.auth_hint) : null)
-        : null,
-      row.provider_env
+        : (row.auth === "unknown" && row.auth_command
+            ? h("div", { className: "flex flex-col gap-1" },
+                h("span", { className: "text-[11px] text-muted-foreground" }, "Signs in via its own CLI (if not already):"),
+                h(CopyCode, { text: row.auth_command }))
+            : null),
+      // Only offer a provider API-key input when the CLI actually authenticates
+      // via a key. CLIs with an interactive login (auth_command) — e.g.
+      // Antigravity — sign in through the CLI, so a key field is misleading.
+      row.provider_env && !row.auth_command
         ? h(KeyInput, { item: { env: [row.provider_env] }, endpoint: "/providers/key", onChanged: onChanged })
         : null,
       row.docs ? h("a", {
@@ -484,10 +499,10 @@
           onClick: onChanged,
           className: "self-start border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10",
         }, "verify"),
-        (row.auth !== "authenticated" && (row.auth_command || row.auth_hint))
+        needsAuth
           ? h(AiHelp, { row: row, question: "I ran the install but authentication isn't working. How do I complete auth and verify it?" })
           : null),
-      !row.provider_env && row.auth === "authenticated"
+      row.auth === "authenticated" && !row.provider_env
         ? h("span", { className: "text-xs text-muted-foreground" }, "Ready")
         : null);
   }

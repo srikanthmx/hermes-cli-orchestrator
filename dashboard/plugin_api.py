@@ -25,6 +25,7 @@ What it does (all real, no fabricated data):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
@@ -889,10 +890,23 @@ class AssistBody(BaseModel):
     log: Optional[str] = None
 
 
-def _pick_assist_worker() -> Optional[str]:
+def _assist_path() -> str:
+    """PATH augmented with common CLI install dirs, so worker resolution works
+    even when the dashboard was launched with a minimal environment."""
+    dirs = [
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+    ]
+    nvm = Path.home() / ".nvm" / "versions" / "node"
+    if nvm.exists():
+        dirs.extend(str(p) for p in sorted(nvm.glob("*/bin")))
+    return os.pathsep.join([os.environ.get("PATH", "")] + dirs)
+
+
+def _pick_assist_worker(path: str) -> Optional[str]:
     """First installed worker CLI in priority order (the free 'AI help' brain)."""
     for w in _DELEGATE_PRIORITY:
-        if w in _ASSIST_ARGV and shutil.which(w):
+        if w in _ASSIST_ARGV and shutil.which(w, path=path):
             return w
     return None
 
@@ -929,13 +943,14 @@ async def install_assist(body: AssistBody):
                       "Be concise and command-first.")
     prompt = "\n\n".join(parts)
 
-    worker = _pick_assist_worker()
+    path = _assist_path()
+    worker = _pick_assist_worker(path)
     argv = None
     used = None
     if worker:
         argv = _ASSIST_ARGV[worker](prompt)
         used = worker
-    elif shutil.which("ollama"):
+    elif shutil.which("ollama", path=path):
         model = os.environ.get("CLI_ASSIST_OLLAMA_MODEL", "qwen3.5:latest")
         argv = ["ollama", "run", model, prompt]
         used = f"ollama/{model}"
@@ -949,11 +964,19 @@ async def install_assist(body: AssistBody):
                     "answer), then try again. Meanwhile, the steps and the setup "
                     "docs link on this card cover the standard path.",
         }
+
+    env = dict(os.environ)
+    env["PATH"] = path
+
+    def _run() -> subprocess.CompletedProcess:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=90, env=env)
+
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+        # Run off the event loop so a slow CLI never freezes the whole dashboard.
+        proc = await asyncio.to_thread(_run)
     except subprocess.TimeoutExpired:
         return {"ok": False, "worker": used,
-                "text": f"{used} took too long to answer (>180s). Try again or "
+                "text": f"{used} took too long to answer (>90s). Try again, or "
                         "follow the written steps on this card."}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "worker": used, "text": f"Could not run {used}: {exc}"}
