@@ -292,7 +292,7 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
 
 # Delegation-capable worker CLIs, in fallback priority order (mirrors
 # __init__.py DELEGATE_ARGV + CODING_PRIORITY). Used to mark "workers" in scan.
-_DELEGATE_PRIORITY = ["codex", "claude", "qwen", "opencode"]
+_DELEGATE_PRIORITY = ["codex", "claude", "qwen", "opencode", "antigravity"]
 
 # Non-interactive argv for each worker CLI (mirrors __init__.py DELEGATE_ARGV).
 # Used by /install/assist to answer install questions through a governed worker

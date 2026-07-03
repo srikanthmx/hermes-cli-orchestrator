@@ -52,17 +52,19 @@ DELEGATION_HINTS = {
 }
 # Capable coding CLIs, in default priority order (used when no explicit
 # orchestration-matrix rule maps an intent to a CLI).
-CODING_PRIORITY = ("codex", "claude", "qwen", "opencode", "crush", "amp",
-                   "cursor-agent", "goose", "aider", "copilot")
+CODING_PRIORITY = ("codex", "claude", "qwen", "opencode", "antigravity",
+                   "crush", "amp", "cursor-agent", "goose", "aider", "copilot")
 
 # Non-interactive one-shot invocation per CLI, as argv lists (no shell → no
 # injection). The task is passed as a single argument. Only CLIs with a clean
-# headless mode are delegation targets.
+# headless mode are delegation targets. Keyed by catalog id; the binary comes
+# from TRACKED_BINS (e.g. the Antigravity CLI id `antigravity` runs `agy`).
 DELEGATE_ARGV = {
     "codex": lambda task: ["codex", "exec", "--skip-git-repo-check", task],
     "claude": lambda task: ["claude", "-p", task],
     "qwen": lambda task: ["qwen", "-p", task],
     "opencode": lambda task: ["opencode", "run", task],
+    "antigravity": lambda task: ["agy", "-p", task],
 }
 # Substrings that indicate a CLI hit a rate/quota limit → fall back to the next.
 RATE_LIMIT_PATTERNS = (
