@@ -229,6 +229,35 @@
     }));
   }
 
+  // Fallback "where to get this key" links, keyed by env var name. Providers
+  // and media rows carry their own `signup`; this covers the rest (and CLIs
+  // whose key input is synthetic).
+  var ENV_KEY_URL = {
+    GEMINI_API_KEY: "https://aistudio.google.com/apikey",
+    ANTHROPIC_API_KEY: "https://console.anthropic.com/settings/keys",
+    OPENAI_API_KEY: "https://platform.openai.com/api-keys",
+    GITHUB_TOKEN: "https://github.com/settings/tokens",
+    OPENROUTER_API_KEY: "https://openrouter.ai/keys",
+    HF_TOKEN: "https://huggingface.co/settings/tokens",
+    GLM_API_KEY: "https://z.ai/manage-apikey/apikey-list",
+    DEEPSEEK_API_KEY: "https://platform.deepseek.com/api_keys",
+    NVIDIA_API_KEY: "https://build.nvidia.com/",
+    NOVITA_API_KEY: "https://novita.ai/settings/key-management",
+    GMI_API_KEY: "https://console.gmicloud.ai/",
+    NOUS_API_KEY: "https://portal.nousresearch.com/",
+    REPLICATE_API_TOKEN: "https://replicate.com/account/api-tokens",
+    FAL_KEY: "https://fal.ai/dashboard/keys",
+    ELEVENLABS_API_KEY: "https://elevenlabs.io/app/settings/api-keys",
+    RUNWAY_API_KEY: "https://dev.runwayml.com/",
+    LUMA_API_KEY: "https://lumalabs.ai/dream-machine/api/keys",
+    MISTRAL_API_KEY: "https://console.mistral.ai/api-keys",
+    CARTESIA_API_KEY: "https://play.cartesia.ai/keys",
+  };
+
+  function keyUrlFor(item, env) {
+    return (item && item.signup) || ENV_KEY_URL[env] || "";
+  }
+
   function KeyInput(props) {
     var item = props.item;
     var endpoint = props.endpoint;
@@ -263,6 +292,12 @@
           className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-xs font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40",
         }, busy ? "..." : saved ? "saved" : "save")
       ),
+      keyUrlFor(item, env)
+        ? h("a", {
+            href: keyUrlFor(item, env), target: "_blank", rel: "noreferrer",
+            className: "self-start text-[11px] text-sky-300 underline hover:text-sky-200",
+          }, "get " + env + " ↗")
+        : null,
       h("label", { className: "flex items-center gap-2 text-[11px] text-muted-foreground" },
         h("input", {
           type: "checkbox",
