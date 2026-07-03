@@ -119,11 +119,13 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "verified": True,  # confirmed working as delegation worker + install assist
     },
     {
-        "id": "antigravity", "name": "Antigravity CLI", "category": "AI Coding",
-        "bin": "antigravity", "alt_bins": ["antigravity-ide"],
+        # The Antigravity CLI is the headless terminal agent, binary `agy`
+        # (distinct from the IDE below). Non-interactive via `agy -p "..."`.
+        "id": "antigravity", "name": "Antigravity CLI (agy)", "category": "AI Coding",
+        "bin": "agy",
         "version_args": ["--version"], "auth": None,
-        "auth_command": "antigravity",
-        "auth_hint": "Run Antigravity once after install and complete Google's interactive sign-in when prompted.",
+        "auth_command": "agy",
+        "auth_hint": "The first `agy` run signs you in via your system keyring / Google Sign-In. Use Check sign-in to test it.",
         "install": {
             "script": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
             "windows-powershell": "irm https://antigravity.google/cli/install.ps1 | iex",
@@ -134,9 +136,20 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
             "windows-powershell": {"label": "Windows PowerShell", "platforms": ["windows"]},
             "windows-cmd": {"label": "Windows CMD", "platforms": ["windows"]},
         },
-        "install_hint": "Official Antigravity docs also include Linux apt/dnf repository install steps.",
         "provider": "gemini", "plan": "Google Antigravity",
-        "docs": "https://antigravity.google/docs/cli/install",
+        "docs": "https://antigravity.google/docs/cli",
+    },
+    {
+        # The Antigravity IDE is the GUI editor (a VS Code fork). Its `code`-style
+        # launcher opens the app; sign-in happens in the app, so it's "Open app".
+        "id": "antigravity-ide", "name": "Antigravity IDE", "category": "AI IDE",
+        "bin": "antigravity-ide", "version_args": ["--version"], "auth": None,
+        "auth_hint": "The IDE signs you in through the app. Use Open app to launch it, then sign in there.",
+        "install": {"script": "curl -fsSL https://antigravity.google/cli/install.sh | bash"},
+        "install_meta": {"script": {"label": "macOS / Linux", "platforms": ["mac", "linux"]}},
+        "provider": "gemini", "plan": "Google Antigravity (IDE)",
+        "docs": "https://antigravity.google",
+        "hide_when_missing": True,
     },
     {
         "id": "gemini", "name": "Gemini CLI (legacy)", "category": "AI Coding",
@@ -301,12 +314,13 @@ _CLI_TEST_ARGV = {
     "qwen": lambda b: [b, "-p", _CLI_PING],
     "claude": lambda b: [b, "-p", _CLI_PING],
     "gemini": lambda b: [b, "-p", _CLI_PING],
+    "antigravity": lambda b: [b, "-p", _CLI_PING],  # bin resolves to `agy`
     "cursor-agent": lambda b: [b, "-p", _CLI_PING],
     "gh": lambda b: [b, "auth", "status"],
     "glab": lambda b: [b, "auth", "status"],
 }
 # CLIs that are GUI/IDE launchers — no headless AI call; the UI offers "Open app".
-_GUI_CLIS = {"antigravity"}
+_GUI_CLIS = {"antigravity-ide"}
 # Substrings that mean "not signed in" in a test's output.
 _AUTH_FAIL_PAT = (
     "not logged in", "please log in", "log in to", "sign in", "signin",
@@ -1051,7 +1065,8 @@ async def cli_test(body: CliActionBody):
     env["PATH"] = path
 
     def _run() -> subprocess.CompletedProcess:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60,
+                              env=env, stdin=subprocess.DEVNULL)
 
     try:
         proc = await asyncio.to_thread(_run)

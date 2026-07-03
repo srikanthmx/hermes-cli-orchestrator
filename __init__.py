@@ -74,7 +74,7 @@ RATE_LIMIT_PATTERNS = (
 TRACKED_BINS = {
     "claude": "claude",
     "codex": "codex",
-    "antigravity": "antigravity",
+    "antigravity": "agy",
     "gemini": "gemini",
     "qwen": "qwen",
     "cursor-agent": "cursor-agent",
@@ -91,11 +91,9 @@ TRACKED_BINS = {
     "ollama": "ollama",
     "hermes": "hermes",
 }
-# bin name -> catalog id (here they're identical, but keep the indirection)
+# bin name -> catalog id (mostly identical, but the Antigravity CLI ships as
+# `agy` while its id is `antigravity`, so the inversion maps agy -> antigravity).
 _BIN_TO_ID = {v: k for k, v in TRACKED_BINS.items()}
-# Alternate command names some tools ship under (mirrors dashboard alt_bins).
-# Antigravity installs its CLI as `antigravity-ide`, not `antigravity`.
-_BIN_TO_ID["antigravity-ide"] = "antigravity"
 
 
 def _hermes_home() -> Path:
