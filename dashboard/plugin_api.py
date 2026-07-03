@@ -291,6 +291,30 @@ _ASSIST_ARGV = {
     "opencode": lambda p: ["opencode", "run", p],
 }
 
+# Live sign-in test per CLI: a tiny non-interactive call. If it returns output
+# without an auth error, the CLI is signed in and working. `b` is the resolved
+# binary. Non-AI CLIs (gh/glab) use their own `auth status`.
+_CLI_PING = "Reply with exactly the word: PONG"
+_CLI_TEST_ARGV = {
+    "codex": lambda b: [b, "exec", "--skip-git-repo-check", _CLI_PING],
+    "opencode": lambda b: [b, "run", _CLI_PING],
+    "qwen": lambda b: [b, "-p", _CLI_PING],
+    "claude": lambda b: [b, "-p", _CLI_PING],
+    "gemini": lambda b: [b, "-p", _CLI_PING],
+    "cursor-agent": lambda b: [b, "-p", _CLI_PING],
+    "gh": lambda b: [b, "auth", "status"],
+    "glab": lambda b: [b, "auth", "status"],
+}
+# CLIs that are GUI/IDE launchers — no headless AI call; the UI offers "Open app".
+_GUI_CLIS = {"antigravity"}
+# Substrings that mean "not signed in" in a test's output.
+_AUTH_FAIL_PAT = (
+    "not logged in", "please log in", "log in to", "sign in", "signin",
+    "unauthorized", "not authenticated", "authentication required", "login required",
+    "no api key", "invalid api key", "missing api key", "401", "token expired",
+    "please authenticate", "run `", "ineligible", "no longer supported",
+)
+
 # Per-package-manager prerequisite so the UI can show "Step 1: install X first".
 _MANAGER_PREREQ = {
     "npm": {"label": "Node.js + npm", "check": "node --version", "bin": "npm",
@@ -677,6 +701,8 @@ async def scan():
             "provenance": _provenance(c, verified_set, _target_key("cli", c["id"])),
             "user_added": bool(c.get("_user_added")),
             "verified_builtin": bool(c.get("verified")),
+            "testable": c["id"] in _CLI_TEST_ARGV,   # can we run a live sign-in test?
+            "gui": c["id"] in _GUI_CLIS,              # IDE/launcher → "Open app" instead
             "limits": _effective_limits(state, _target_key("cli", c["id"]), _default_limits_for_cli(c), c["id"]),
             "usage": _windows(usage.get(_target_key("cli", c["id"]), usage.get(c["id"], []))),
         })
@@ -985,6 +1011,91 @@ async def install_assist(body: AssistBody):
     if not text:
         text = f"{used} returned no output (exit {proc.returncode})."
     return {"ok": proc.returncode == 0, "worker": used, "text": text[-6000:]}
+
+
+class CliActionBody(BaseModel):
+    id: str
+
+
+@router.post("/cli/test")
+async def cli_test(body: CliActionBody):
+    """Live sign-in test: run a tiny call through the CLI itself and read the
+    result. On success, auto-mark the CLI verified. GUI/launcher CLIs can't be
+    tested headlessly → status 'manual'."""
+    cat = {c["id"]: c for c in load_catalog()}
+    entry = cat.get(body.id)
+    if not entry:
+        raise HTTPException(404, f"Unknown CLI id: {body.id}")
+
+    path = _assist_path()
+    resolved = _resolve_bin(entry)
+    if not (resolved and shutil.which(resolved, path=path)):
+        return {"status": "error", "detail": f"{entry['name']} is not on PATH — install it first."}
+
+    if body.id in _GUI_CLIS:
+        return {
+            "status": "manual",
+            "detail": f"{entry['name']} is a GUI app — open it and sign in there, "
+                      "then re-check. It can't be tested from a headless call.",
+        }
+    if body.id not in _CLI_TEST_ARGV:
+        cmd = entry.get("auth_command")
+        return {
+            "status": "manual",
+            "detail": ("No automatic test for this CLI. Sign in with: " + cmd)
+                      if cmd else "No automatic sign-in test is available for this CLI.",
+        }
+
+    argv = _CLI_TEST_ARGV[body.id](resolved)
+    env = dict(os.environ)
+    env["PATH"] = path
+
+    def _run() -> subprocess.CompletedProcess:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+
+    try:
+        proc = await asyncio.to_thread(_run)
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "detail": f"{entry['name']} test timed out (>60s)."}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "detail": f"Could not run {entry['name']}: {exc}"}
+
+    out = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    low = out.lower()
+    failed = any(p in low for p in _AUTH_FAIL_PAT)
+
+    if proc.returncode == 0 and out and not failed:
+        # Signed in and working → record it as verified.
+        state = read_state()
+        marks = set(state.get("verified", []))
+        marks.add(_target_key("cli", body.id))
+        state["verified"] = sorted(marks)
+        write_state(state)
+        return {"status": "signed_in", "detail": out[:500]}
+    if failed:
+        return {"status": "needs_auth", "detail": out[:500]}
+    return {"status": "error", "detail": out[:500] or f"exit {proc.returncode}, no output"}
+
+
+@router.post("/cli/open")
+async def cli_open(body: CliActionBody):
+    """Launch a GUI/launcher CLI (e.g. Antigravity) so the user can sign in."""
+    cat = {c["id"]: c for c in load_catalog()}
+    entry = cat.get(body.id)
+    if not entry:
+        raise HTTPException(404, f"Unknown CLI id: {body.id}")
+    path = _assist_path()
+    resolved = _resolve_bin(entry)
+    if not (resolved and shutil.which(resolved, path=path)):
+        raise HTTPException(400, f"{entry['name']} is not on PATH")
+    env = dict(os.environ)
+    env["PATH"] = path
+    try:
+        subprocess.Popen([resolved], env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"Could not launch {entry['name']}: {exc}")
+    return {"ok": True, "launched": resolved}
 
 
 def _model_provider_map() -> Dict[str, str]:

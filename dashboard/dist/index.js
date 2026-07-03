@@ -461,10 +461,61 @@
           className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "setup docs") : null));
   }
 
+  // Live sign-in check: runs a real sample call through the CLI and shows the
+  // true status. Auto-marks verified on success (backend does the marking).
+  function CliTest(props) {
+    var row = props.row;
+    var busySt = useState(false); var busy = busySt[0], setBusy = busySt[1];
+    var openingSt = useState(false); var opening = openingSt[0], setOpening = openingSt[1];
+    var resSt = useState(null); var res = resSt[0], setRes = resSt[1];
+
+    function runTest() {
+      setBusy(true); setRes(null);
+      postJSON("/cli/test", { id: row.id })
+        .then(function (r) {
+          setRes(r || { status: "error", detail: "No response" });
+          if (r && r.status === "signed_in" && props.onChanged) props.onChanged();
+        })
+        .catch(function (e) { setRes({ status: "error", detail: String(e) }); })
+        .finally(function () { setBusy(false); });
+    }
+    function openApp() {
+      setOpening(true);
+      postJSON("/cli/open", { id: row.id })
+        .then(function () { setRes({ status: "opened", detail: "Opened " + targetName(row) + " — sign in there, then re-check." }); })
+        .catch(function (e) { setRes({ status: "error", detail: "Could not open: " + e }); })
+        .finally(function () { setOpening(false); });
+    }
+
+    var st = res && res.status;
+    return h("div", { className: "flex flex-col gap-1" },
+      h("div", { className: "flex flex-wrap items-center gap-2" },
+        h("button", {
+          onClick: runTest, disabled: busy,
+          className: "border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] font-courier text-sky-300 hover:bg-sky-500/20 disabled:opacity-40",
+        }, busy ? "checking…" : "Check sign-in"),
+        row.gui ? h("button", {
+          onClick: openApp, disabled: opening,
+          className: "border border-border px-2 py-1 text-[11px] font-courier hover:bg-foreground/10 disabled:opacity-40",
+        }, opening ? "opening…" : "Open app") : null,
+        row.docs ? h("a", { href: row.docs, target: "_blank", rel: "noreferrer",
+          className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "docs") : null),
+      st === "signed_in" ? h("div", { className: "text-[11px] text-emerald-300" }, "✓ Signed in & working — marked verified.") : null,
+      st === "opened" ? h("div", { className: "text-[11px] text-muted-foreground" }, res.detail) : null,
+      (st === "needs_auth") ? h("div", { className: "flex flex-col gap-1 border border-amber-500/30 bg-amber-500/10 p-2" },
+        h("div", { className: "text-[11px] uppercase tracking-wider text-amber-300" }, "Not signed in"),
+        row.auth_command ? h("div", { className: "flex flex-col gap-1" },
+          h("span", { className: "text-[11px] text-muted-foreground" }, "Run this once, then re-check:"),
+          h(CopyCode, { text: row.auth_command })) : null,
+        h(AiHelp, { row: row, question: "This CLI reports it's not signed in. Give me the exact steps to authenticate it." })) : null,
+      (st === "manual" || st === "error") ? h("div", { className: "flex flex-col gap-1" },
+        h("pre", { className: "max-h-32 overflow-auto whitespace-pre-wrap font-courier text-[10px] text-muted-foreground" }, res.detail || ""),
+        st === "error" ? h(AiHelp, { row: row, question: "This CLI test failed with the output above. What's wrong and how do I fix it?" }) : null) : null);
+  }
+
   function CliConfigure(props) {
     var row = props.row;
     var onChanged = props.onChanged;
-    var helpSt = useState(false); var help = helpSt[0], setHelp = helpSt[1];
 
     if (!row.installed) {
       return h(InstallStepper, { row: row, onChanged: onChanged });
@@ -498,28 +549,12 @@
         docsLink);
     }
 
-    // Otherwise it's usable (authenticated, or installed + can't-probe-auth).
-    // Show a clear Ready status; tuck the "not working?" helpers behind a link.
+    // Otherwise it's installed. Instead of guessing auth, offer a live check:
+    // "Check sign-in" runs a real call and shows the true status (GUI CLIs get
+    // an "Open app" button). Ready pill stays for a working/authed CLI.
     return h("div", { className: "flex min-w-[220px] flex-col gap-2" },
-      h("div", { className: "flex items-center gap-2" },
-        pill("ready", "ok"),
-        (row.auth_command || row.docs)
-          ? h("button", {
-              onClick: function () { setHelp(!help); },
-              className: "text-[11px] text-muted-foreground underline hover:text-foreground",
-            }, help ? "hide" : "not working?")
-          : null),
-      help ? h("div", { className: "flex flex-col gap-2 border border-border bg-background/40 p-2" },
-        row.auth_command
-          ? h("div", { className: "flex flex-col gap-1" },
-              h("span", { className: "text-[11px] text-muted-foreground" }, "If it's not signed in, run this once:"),
-              h(CopyCode, { text: row.auth_command }))
-          : null,
-        h("div", { className: "flex flex-wrap items-center gap-2" },
-          h("button", { onClick: onChanged,
-            className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10" }, "re-check"),
-          h(AiHelp, { row: row, question: "This CLI is installed but not behaving. Help me verify it's authenticated and working." })),
-        docsLink) : null);
+      row.auth === "authenticated" ? h("div", { className: "flex items-center gap-2" }, pill("ready", "ok")) : null,
+      h(CliTest, { row: row, onChanged: onChanged }));
   }
 
   // ── Single, unified backend config (CLIs + models + media in ONE place) ──
