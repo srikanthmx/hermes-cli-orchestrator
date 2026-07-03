@@ -464,47 +464,62 @@
   function CliConfigure(props) {
     var row = props.row;
     var onChanged = props.onChanged;
+    var helpSt = useState(false); var help = helpSt[0], setHelp = helpSt[1];
+
     if (!row.installed) {
       return h(InstallStepper, { row: row, onChanged: onChanged });
     }
-    // "unauthenticated" = detected NOT signed in → nag. "unknown" = we can't
-    // probe this CLI's auth (auth: None), so don't claim it needs auth — it may
-    // already be signed in via its own CLI login (e.g. Antigravity).
-    var needsAuth = row.auth === "unauthenticated";
-    return h("div", { className: "flex min-w-[260px] flex-col gap-2" },
-      needsAuth && (row.auth_command || row.auth_hint)
-        ? h("div", { className: "flex flex-col gap-1 border border-amber-500/30 bg-amber-500/10 p-2" },
-            h("div", { className: "text-[11px] uppercase tracking-wider text-amber-300" }, "Auth required"),
-            row.auth_command ? h(CopyCode, { text: row.auth_command }) : null,
-            row.auth_hint ? h("div", { className: "text-[11px] text-muted-foreground" }, row.auth_hint) : null)
-        : (row.auth === "unknown" && row.auth_command
-            ? h("div", { className: "flex flex-col gap-1" },
-                h("span", { className: "text-[11px] text-muted-foreground" }, "Signs in via its own CLI (if not already):"),
-                h(CopyCode, { text: row.auth_command }))
-            : null),
-      // Only offer a provider API-key input when the CLI actually authenticates
-      // via a key. CLIs with an interactive login (auth_command) — e.g.
-      // Antigravity — sign in through the CLI, so a key field is misleading.
-      row.provider_env && !row.auth_command
-        ? h(KeyInput, { item: { env: [row.provider_env] }, endpoint: "/providers/key", onChanged: onChanged })
-        : null,
-      row.docs ? h("a", {
-          href: row.docs,
-          target: "_blank",
-          rel: "noreferrer",
-          className: "text-[11px] text-muted-foreground underline hover:text-foreground",
-        }, "setup docs") : null,
-      h("div", { className: "flex flex-wrap items-center gap-2" },
-        h("button", {
-          onClick: onChanged,
-          className: "self-start border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10",
-        }, "verify"),
-        needsAuth
-          ? h(AiHelp, { row: row, question: "I ran the install but authentication isn't working. How do I complete auth and verify it?" })
+
+    var keyAuth = row.provider_env && !row.auth_command; // configured via API key
+    var needsAuth = row.auth === "unauthenticated";      // detected: NOT signed in
+    var docsLink = row.docs ? h("a", {
+      href: row.docs, target: "_blank", rel: "noreferrer",
+      className: "text-[11px] text-muted-foreground underline hover:text-foreground",
+    }, "setup docs") : null;
+
+    // Key-auth CLI not yet keyed → the key box IS the action.
+    if (keyAuth && row.auth !== "authenticated") {
+      return h("div", { className: "flex min-w-[260px] flex-col gap-2" },
+        h(KeyInput, { item: { env: [row.provider_env] }, endpoint: "/providers/key", onChanged: onChanged }),
+        docsLink);
+    }
+
+    // Interactive-login CLI, detected NOT signed in → one clear instruction.
+    if (needsAuth && row.auth_command) {
+      return h("div", { className: "flex min-w-[260px] flex-col gap-2" },
+        h("div", { className: "flex flex-col gap-1 border border-amber-500/30 bg-amber-500/10 p-2" },
+          h("div", { className: "text-[11px] uppercase tracking-wider text-amber-300" }, "Sign in — run this once in your terminal:"),
+          h(CopyCode, { text: row.auth_command }),
+          row.auth_hint ? h("div", { className: "text-[11px] text-muted-foreground" }, row.auth_hint) : null),
+        h("div", { className: "flex flex-wrap items-center gap-2" },
+          h("button", { onClick: onChanged,
+            className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10" }, "I've signed in — re-check"),
+          h(AiHelp, { row: row, question: "Sign-in for this CLI isn't working. Give me the exact steps to authenticate and verify it." })),
+        docsLink);
+    }
+
+    // Otherwise it's usable (authenticated, or installed + can't-probe-auth).
+    // Show a clear Ready status; tuck the "not working?" helpers behind a link.
+    return h("div", { className: "flex min-w-[220px] flex-col gap-2" },
+      h("div", { className: "flex items-center gap-2" },
+        pill("ready", "ok"),
+        (row.auth_command || row.docs)
+          ? h("button", {
+              onClick: function () { setHelp(!help); },
+              className: "text-[11px] text-muted-foreground underline hover:text-foreground",
+            }, help ? "hide" : "not working?")
           : null),
-      row.auth === "authenticated" && !row.provider_env
-        ? h("span", { className: "text-xs text-muted-foreground" }, "Ready")
-        : null);
+      help ? h("div", { className: "flex flex-col gap-2 border border-border bg-background/40 p-2" },
+        row.auth_command
+          ? h("div", { className: "flex flex-col gap-1" },
+              h("span", { className: "text-[11px] text-muted-foreground" }, "If it's not signed in, run this once:"),
+              h(CopyCode, { text: row.auth_command }))
+          : null,
+        h("div", { className: "flex flex-wrap items-center gap-2" },
+          h("button", { onClick: onChanged,
+            className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10" }, "re-check"),
+          h(AiHelp, { row: row, question: "This CLI is installed but not behaving. Help me verify it's authenticated and working." })),
+        docsLink) : null);
   }
 
   // ── Single, unified backend config (CLIs + models + media in ONE place) ──
