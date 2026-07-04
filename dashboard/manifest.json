@@ -1,7 +1,7 @@
 {
   "name": "cli-orchestrator",
-  "label": "CLI Matrix",
-  "description": "Local CLI manager & orchestration matrix — detect, authenticate, rate-limit, and route terminal worker CLIs (Claude Code, Codex, gh, Copilot, …).",
+  "label": "CLI Governor",
+  "description": "Control plane for local AI CLIs + model/media backends — detect, install, sign-in-check, cap, route, and delegate (Codex, Antigravity, OpenCode, Claude Code, …).",
   "icon": "Terminal",
   "version": "0.1.0",
   "tab": {

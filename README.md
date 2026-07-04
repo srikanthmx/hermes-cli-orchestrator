@@ -1,31 +1,53 @@
 # Hermes CLI Orchestrator
 
-A drop-in [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin that turns
-Hermes into a **governor for free/subscription CLIs and media backends** — so you can
-run Hermes at ~$0 by stacking the tiers you already pay for (or get free) instead of a
-single paid API plan. It adds a **CLI Matrix** dashboard tab plus runtime hooks.
+**The CLI & backend control plane for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
+
+Hermes already governs your *model providers* (fallback chains, Mixture-of-Agents,
+pooled credentials, an OAuth→OpenAI proxy). This plugin **extends that governance to your
+local AI CLIs** — Codex, Antigravity (`agy`), OpenCode, Claude Code, Cursor, and friends —
+and gives you **one dashboard to run the whole fleet**: detect, install, sign-in-check,
+cap, route, and delegate. The goal: run Hermes at ~$0 by putting every CLI, subscription,
+free-tier key, and local model to work, instead of leaning on a single paid plan.
+
+## How this differs from Hermes itself (honest)
+
+Hermes **v0.18** natively does multi-model **fallback**, **Mixture-of-Agents**, **pooled
+credentials** (`hermes auth`), an OAuth **proxy**, **cron**, model-independent
+**memory/skills/sessions**, and it can **run CLIs** (the `terminal` tool + the desktop
+app's integrated terminal). We don't reinvent those. What this plugin adds on top:
+
+- **Governs *CLIs*, not just model providers** — brings local AI CLIs into the same regime Hermes applies to API/OAuth backends: detection, per-CLI caps, usage tracking, delegation with fallback.
+- **`cli_delegate` / `/cli-delegate`** — a **deterministic**, cap-aware delegation across CLIs (Codex → Qwen → OpenCode → `agy` …) that skips exhausted ones and falls through on rate-limits. The reliable path for when a weak orchestrating model would otherwise *narrate* "I'll run codex…" instead of actually running it.
+- **A single control-plane dashboard** — CLIs + model providers + media backends in one **Backends** tab (status, provenance, per-backend category toggles, caps, keys **with "get key" links**, guided install), plus a **Routing** tab for per-category primary/fallback. Hermes has config subcommands and a terminal; this is the unified UI.
+- **Per-backend ops tooling** — **live "Check sign-in"** (runs a real sample call through the CLI and reports the true status, auto-marking it *verified*), a **guided install stepper** with prereq probing + streaming logs, and an **"Ask AI for help"** button that answers setup questions *through one of your own governed CLIs* (free, no extra key).
+- **`generate_music`** tool — Hermes has no music framework.
 
 ## What it does
 
-**Local CLI management**
-- **Detect** every CLI on the host (`which` + version probe) — Online / Not Authenticated / Missing.
-- **Auth status** for CLIs that expose it (e.g. `gh auth status`) or a credentials-file check.
-- **Rate-limit guardrails** — hourly / daily / monthly caps per CLI.
-- **Real usage tracking** — a `post_tool_call` hook tallies every time the agent drives a CLI through the `terminal` tool (gauges, "over cap" warnings).
-- **One-click install** — runs a catalog install command (`npm i -g`, `brew install`, …), detached, with streamed logs.
-- **17-CLI catalog** — Claude Code, Codex, Gemini, Qwen, Copilot, OpenCode, Cursor, Amp, Crush, Goose, Aider, mods, llm, gh, glab, Ollama, Hermes — each tagged with its Hermes **provider** mapping and **plan** (free / subscription / BYO / local).
+**Local CLI governance**
+- **Detect** every CLI on the host (`which` + version + auth probe) — Ready / Auth needed / Missing, with **provenance** (verified · catalog · custom).
+- **Live "Check sign-in"** — a real one-shot call through the CLI to confirm it's authenticated and working; passing auto-marks it **verified**.
+- **Rate-limit guardrails** — hourly / daily / monthly caps per backend, with usage gauges.
+- **Guided install** — a numbered stepper (prereq check → command with copy → live log → auth → verify) and an AI-assisted help button.
+- **19-CLI catalog** — Claude Code, Codex, **Antigravity CLI (`agy`)** + **Antigravity IDE**, Gemini, Qwen, Copilot, OpenCode, Cursor, Amp, Crush, Goose, Aider, mods, llm, gh, glab, Ollama, Hermes.
 
-**Intent routing**
-- A `pre_llm_call` hook injects a routing policy so a cheap local orchestrator **delegates high-intensity work** (code gen, etc.) to capable CLIs via the orchestration matrix. It **auto-suppresses** when the primary model is already a capable provider — so it adds zero noise once you're on Codex/Copilot/etc.
+**Delegation & routing**
+- **`cli_delegate` tool + `/cli-delegate` command** — put a local CLI to work with cap-skip, cross-CLI fallback, and usage recording.
+- **Category routing** — set a primary + fallback per use case (coding, chat, image, audio, video, research, docs, automation) among the backends you've enabled for it.
 
-**Media & Integrations panel**
-- **34 media backends** across **Voice/TTS, Speech-to-Text, Image, Video, Music**, each labelled **native** (Hermes built-in) vs **plugin** (needs a backend), with **in-UI API-key entry** written to `~/.hermes/.env` (`chmod 600`, value never echoed).
-- Ships two working backends and one tool (see below).
+**Model & media governance (a management layer over Hermes-native mechanisms)**
+- **Model registry** — free/cheap/subscription providers with tier labels, **"get key" links**, and cooldown *visibility* (e.g. "Codex → retry in 28d"). *The fallback/pooling underneath is Hermes-native; the registry + links + surfacing are ours.*
+- **34 media backends** across Voice/TTS, Speech-to-Text, Image, Video, Music with in-UI key entry (written to `~/.hermes/.env`, `chmod 600`, value never echoed) — each with a **"get key" link**.
 
-**`/cli` slash command** — quick CLI status + usage inside any Hermes session.
+**Remote control** — `/cli-*` slash commands manage the governor from any gateway (Telegram, …).
 
 It integrates **only** through Hermes's documented plugin contracts, so nothing in the
 Hermes codebase is modified and upstream upgrades stay clean.
+
+> **Roadmap (not yet built — don't expect these to work):** auto-cooldown detection
+> (auto-route around an exhausted bucket like Codex's 28-day cap), a one-click free-first
+> chain builder, and multi-key/multi-account pooling wrappers. Today cooldowns are
+> *surfaced*, and the rotation itself is Hermes-native `fallback`/`auth`.
 
 ---
 
@@ -56,7 +78,7 @@ git clone https://github.com/srikanthmx/hermes-cli-orchestrator.git \
 ```bash
 hermes plugins enable cli-orchestrator
 ```
-This activates the usage hook, the intent-routing policy, the `/cli` command, and the `generate_music` tool on next start. (The dashboard tab works even without this.)
+This activates the usage hook, the intent-routing policy, the `cli_delegate` tool + `/cli-*` commands, and the `generate_music` tool on next start. (The dashboard tab works even without this.)
 
 ### 4. Launch the dashboard
 ```bash
@@ -65,25 +87,25 @@ hermes dashboard
 First launch builds the web UI once, then opens `http://127.0.0.1:9119`.
 > Open it from the URL Hermes launches — it carries the loopback token; a hand-typed tab bounces to login.
 
-### 5. Open the **CLI Matrix** tab
-Right after **Skills** in the left nav. The dashboard is organized by use case:
-**Coding**, **Chat**, **Image**, **Audio**, **Video**, **Research**, **Docs**,
-**Automation**, and **Other**. Each view shows the configured CLI/model/media
-targets as an editable readiness matrix, with route priority, fallback,
-credential slots, caps, install actions, auth guidance, verify actions, and key
-entry in one place. Detection, limits, install, routing, and media keys all work
-with **no model configured**.
-Limits are prefilled from the catalog/provider tier instead of showing blank
-zeroes; saved values override the prefill.
-Local/custom targets are not pushed into the default flow. They appear only when
-detected/configured or when you explicitly choose **Add custom/local**, and they
-sort to the end of each matrix.
-Google's May 19, 2026 transition notice is reflected too: Antigravity CLI is the
-forward path for individual/free Google workflows, while Gemini CLI is treated
-as legacy and shown only if installed or explicitly configured for Enterprise /
-API-key use.
+### 5. Open the **CLI Governor** tab
+Right after **Skills** in the left nav. Two top-level tabs:
 
-Antigravity CLI install/auth flow:
+- **Backends** — configure every backend once: CLIs, model providers, and media
+  in one table with status, **provenance** (verified · catalog · custom), the
+  categories it **Serves** (toggleable), credential slots, caps, usage, the
+  **guided install** stepper (for missing CLIs), **live "Check sign-in"**, and
+  key entry **with a "get key" link**.
+- **Routing** — per use case (**Coding, Chat, Image, Audio, Video, Research,
+  Docs, Automation, Other**), pick a **primary + fallback** among the backends
+  you enabled for that category.
+
+Detection, limits, install, routing, and media keys all work with **no model
+configured**. Caps are prefilled from the catalog/provider tier; saved values
+override. Local/custom targets only appear when detected or when you choose
+**Add custom/local**. Gemini CLI is treated as legacy (its free tier ended); the
+forward path for free Google workflows is the **Antigravity CLI (`agy`)**.
+
+Antigravity CLI (`agy`) install/auth flow:
 ```bash
 # macOS and Linux, from Google's Antigravity CLI install docs
 curl -fsSL https://antigravity.google/cli/install.sh | bash
@@ -100,11 +122,11 @@ curl -fsSL https://antigravity.google/cli/install.cmd -o install.cmd && install.
 ```
 
 ```bash
-# then run once and complete Google's interactive sign-in
-antigravity
+# then run once and complete Google's sign-in; test headlessly with:
+agy -p "reply PONG"
 ```
-Linux apt/dnf repository steps are also in Google's install page and linked from
-the same row via **setup docs**: https://antigravity.google/docs/cli/install
+The IDE (a separate product) installs as `antigravity-ide`; use the **Open app**
+button on its card to sign in. Setup docs: https://antigravity.google/docs/cli
 
 ### 6. (Optional) install the bundled media backends
 This repo ships extra Hermes provider-plugins under `backends/` to make media work:
@@ -216,7 +238,7 @@ The backend computes `HERMES_HOME` itself and avoids importing Hermes internals,
 
 | File | Contract | Role |
 |------|----------|------|
-| `dashboard/manifest.json` | Dashboard plugin | Registers the **CLI Matrix** tab |
+| `dashboard/manifest.json` | Dashboard plugin | Registers the **CLI Governor** tab |
 | `dashboard/plugin_api.py` | Dashboard plugin | FastAPI `router` at `/api/plugins/cli-orchestrator/` (CLI scan/limits/routing/install + Media catalog/scan/key) |
 | `dashboard/dist/index.js` | Dashboard plugin | React UI (no build step; `window.__HERMES_PLUGIN_SDK__`) |
 | `plugin.yaml` | General plugin | Declares hooks + the `generate_music` tool |
