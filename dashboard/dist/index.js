@@ -592,6 +592,15 @@
       h(CliTest, { row: row, onChanged: onChanged }));
   }
 
+  // A backend is "fleet-ready" (promoted, routable) once it's installed +
+  // verified (CLI), authed (model), or configured (media).
+  function fleetReady(row) {
+    if (row.type === "cli") return row.installed && (row.provenance === "verified" || row.auth === "authenticated");
+    if (row.type === "provider") return !!row.authed;
+    if (row.type === "media") return !!row.configured;
+    return false;
+  }
+
   // ── Single, unified backend config (CLIs + models + media in ONE place) ──
   // Configure a backend once here; category routing below just references it.
   function BackendsConfig(props) {
@@ -623,12 +632,105 @@
     var kinds = [["all", "All"], ["cli", "CLIs"], ["provider", "Models"], ["media", "Media"]];
     var rows = targets.filter(function (t) { return filter === "all" || t.type === filter; });
 
+    // Promotion stages. A backend rises into the FLEET only once it's installed
+    // AND verified (passed the live test) / authed / configured — otherwise it
+    // sits in Set-up (verify / add key) or Install (guided). This is the
+    // "promote to the matrix when tested" flow.
+    function stageOf(row) {
+      if (row.type === "cli" && !row.installed) return "install";
+      return fleetReady(row) ? "fleet" : "setup";
+    }
+    var STAGES = [
+      ["fleet", "Fleet — verified & ready", "text-emerald-300",
+       "The working matrix: installed + verified (passed a live test), authed models, configured media. These are what routing/delegation use."],
+      ["setup", "Set up — verify or add a key", "text-amber-300",
+       "Detected/known but not yet promoted. Run Check sign-in, complete sign-in, or paste a key — it moves up once it passes."],
+      ["install", "Install from catalog", "text-muted-foreground",
+       "Known CLIs you haven't installed. Use the step-by-step install, then verify to promote."],
+    ];
+    var groups = { fleet: [], setup: [], install: [] };
+    rows.forEach(function (r) { groups[stageOf(r)].push(r); });
+
+    function headCells() {
+      return h("tr", { className: "border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground" },
+        h("th", { className: "py-2 pr-3" }, "Backend"),
+        h("th", { className: "py-2 pr-3" }, "Status"),
+        h("th", { className: "py-2 pr-3" }, "Serves"),
+        h("th", { className: "py-2 pr-3" }, "Plan / capability"),
+        h("th", { className: "py-2 pr-3" }, "Credential pool"),
+        h("th", { className: "py-2 pr-3" }, "Usage"),
+        h("th", { className: "py-2 pr-3" }, "Limits"),
+        h("th", { className: "py-2" }, "Configure"));
+    }
+    function rowEl(row) {
+      var isCli = row.type === "cli";
+      var isProvider = row.type === "provider";
+      var isMedia = row.type === "media";
+      var slots = row.key_count || 0;
+      var usage = row.usage || {};
+      var source = row.limits && row.limits.source === "custom" ? "custom" : "prefill";
+      return h("tr", { key: targetId(row), className: "border-b border-border/60 align-top" },
+        h("td", { className: "py-3 pr-3" },
+          h("div", { className: "flex flex-wrap items-center gap-2" },
+            pill(row.type, isCli ? "ok" : isProvider ? "info" : "warn"),
+            h(ProvenanceTag, { row: row, onChanged: props.onChanged }),
+            row.isDeprecated ? pill("legacy", "warn") : null,
+            h("div", { className: "min-w-0" },
+              h("div", { className: "font-courier text-sm" }, targetName(row)),
+              h("div", { className: "truncate text-[11px] text-muted-foreground" }, row.bin || row.model || row.category || "")))),
+        h("td", { className: "py-3 pr-3" }, statusFor(row)),
+        h("td", { className: "py-3 pr-3" },
+          isMedia
+            ? h("div", { className: "flex flex-wrap gap-1" }, (row.enabledCaps || []).map(function (u) {
+                return h("span", { key: u, className: "border border-emerald-500/50 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-courier text-emerald-200" }, USE_CASE_NAMES[u] || u);
+              }))
+            : h(ServesToggles, { row: row, onChanged: props.onChanged })),
+        h("td", { className: "max-w-[240px] py-3 pr-3 text-xs text-muted-foreground" },
+          row.plan || row.limit || row.mechanism || row.category || ""),
+        h("td", { className: "py-3 pr-3" },
+          row.env && (Array.isArray(row.env) ? row.env.length : row.env)
+            ? h("div", { className: "flex flex-col gap-1" },
+                pill(slots + " slot" + (slots === 1 ? "" : "s"), slots ? "ok" : "neutral"),
+                h("span", { className: "font-courier text-[11px] text-muted-foreground" },
+                  Array.isArray(row.env) ? row.env.join(", ") : row.env))
+            : h("span", { className: "text-xs text-muted-foreground" }, "Keyless / local")),
+        h("td", { className: "py-3 pr-3" },
+          h("div", { className: "flex flex-col gap-0.5 font-courier text-[11px] text-muted-foreground" },
+            h("span", null, "hour " + (usage.hour || 0) + " / " + capValue(row, "hourly")),
+            h("span", null, "day " + (usage.day || 0) + " / " + capValue(row, "daily")),
+            h("span", null, "month " + (usage.month || 0) + " / " + capValue(row, "monthly")))),
+        h("td", { className: "py-3 pr-3" },
+          h("div", { className: "flex flex-col gap-1" },
+            h("div", { className: "flex items-center gap-1" },
+              ["hourly", "daily", "monthly"].map(function (f) {
+                return h("input", {
+                  key: f, type: "number", min: 1, title: f,
+                  value: capValue(row, f),
+                  onChange: function (e) { setCap(row, f, e.target.value); },
+                  className: inputClass("w-16 font-courier"),
+                });
+              }),
+              h("button", {
+                onClick: function () { saveCaps(row); },
+                className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10",
+              }, "save")),
+            h("span", { className: "text-[11px] text-muted-foreground" }, source))),
+        h("td", { className: "py-3" },
+          isCli
+            ? h(CliConfigure, { row: row, onChanged: props.onChanged })
+            : isProvider
+              ? h(KeyInput, { item: row, endpoint: "/providers/key", onChanged: props.onChanged })
+              : isMedia
+                ? h(KeyInput, { item: row, endpoint: "/media/key", onChanged: props.onChanged })
+                : h("span", { className: "text-xs text-muted-foreground" }, "Configured")));
+    }
+
     return h(C.Card, null,
       h(C.CardHeader, { className: "pb-2" },
         h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
           h("div", { className: "min-w-0" },
-            h(C.CardTitle, { className: "font-courier text-base" }, "Backends — configure once"),
-            h("div", { className: "text-[11px] text-muted-foreground" }, "CLIs, models and media in one place. Caps, keys and install live here; routing is per category below.")),
+            h(C.CardTitle, { className: "font-courier text-base" }, "Backends"),
+            h("div", { className: "text-[11px] text-muted-foreground" }, "Install & verify below — a backend promotes into the Fleet once it passes the test. Routing (next tab) uses the Fleet.")),
           h("div", { className: "flex flex-wrap items-center gap-2" },
             msg ? h("span", { className: "text-xs text-muted-foreground" }, msg) : null,
             h("div", { className: "flex gap-1" }, kinds.map(function (k) {
@@ -642,87 +744,28 @@
               onClick: props.onChanged,
               className: "border border-border bg-background/40 px-3 py-1 text-xs font-courier hover:bg-foreground/10",
             }, "Re-scan")))),
-      h(C.CardContent, { className: "overflow-x-auto" },
-        h("table", { className: "w-full min-w-[1040px] border-collapse text-sm" },
-          h("thead", null,
-            h("tr", { className: "border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground" },
-              h("th", { className: "py-2 pr-3" }, "Backend"),
-              h("th", { className: "py-2 pr-3" }, "Status"),
-              h("th", { className: "py-2 pr-3" }, "Serves"),
-              h("th", { className: "py-2 pr-3" }, "Plan / capability"),
-              h("th", { className: "py-2 pr-3" }, "Credential pool"),
-              h("th", { className: "py-2 pr-3" }, "Usage"),
-              h("th", { className: "py-2 pr-3" }, "Limits"),
-              h("th", { className: "py-2" }, "Configure"))),
-          h("tbody", null,
-            rows.map(function (row) {
-              var isCli = row.type === "cli";
-              var isProvider = row.type === "provider";
-              var isMedia = row.type === "media";
-              var slots = row.key_count || 0;
-              var usage = row.usage || {};
-              var source = row.limits && row.limits.source === "custom" ? "custom" : "prefill";
-              return h("tr", { key: targetId(row), className: "border-b border-border/60 align-top" },
-                h("td", { className: "py-3 pr-3" },
-                  h("div", { className: "flex flex-wrap items-center gap-2" },
-                    pill(row.type, isCli ? "ok" : isProvider ? "info" : "warn"),
-                    h(ProvenanceTag, { row: row, onChanged: props.onChanged }),
-                    row.isDeprecated ? pill("legacy", "warn") : null,
-                    h("div", { className: "min-w-0" },
-                      h("div", { className: "font-courier text-sm" }, targetName(row)),
-                      h("div", { className: "truncate text-[11px] text-muted-foreground" }, row.bin || row.model || row.category || "")))),
-                h("td", { className: "py-3 pr-3" }, statusFor(row)),
-                h("td", { className: "py-3 pr-3" },
-                  isMedia
-                    ? h("div", { className: "flex flex-wrap gap-1" }, (row.enabledCaps || []).map(function (u) {
-                        return h("span", { key: u, className: "border border-emerald-500/50 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-courier text-emerald-200" }, USE_CASE_NAMES[u] || u);
-                      }))
-                    : h(ServesToggles, { row: row, onChanged: props.onChanged })),
-                h("td", { className: "max-w-[240px] py-3 pr-3 text-xs text-muted-foreground" },
-                  row.plan || row.limit || row.mechanism || row.category || ""),
-                h("td", { className: "py-3 pr-3" },
-                  row.env && (Array.isArray(row.env) ? row.env.length : row.env)
-                    ? h("div", { className: "flex flex-col gap-1" },
-                        pill(slots + " slot" + (slots === 1 ? "" : "s"), slots ? "ok" : "neutral"),
-                        h("span", { className: "font-courier text-[11px] text-muted-foreground" },
-                          Array.isArray(row.env) ? row.env.join(", ") : row.env))
-                    : h("span", { className: "text-xs text-muted-foreground" }, "Keyless / local")),
-                h("td", { className: "py-3 pr-3" },
-                  h("div", { className: "flex flex-col gap-0.5 font-courier text-[11px] text-muted-foreground" },
-                    h("span", null, "hour " + (usage.hour || 0) + " / " + capValue(row, "hourly")),
-                    h("span", null, "day " + (usage.day || 0) + " / " + capValue(row, "daily")),
-                    h("span", null, "month " + (usage.month || 0) + " / " + capValue(row, "monthly")))),
-                h("td", { className: "py-3 pr-3" },
-                  h("div", { className: "flex flex-col gap-1" },
-                    h("div", { className: "flex items-center gap-1" },
-                      ["hourly", "daily", "monthly"].map(function (f) {
-                        return h("input", {
-                          key: f, type: "number", min: 1, title: f,
-                          value: capValue(row, f),
-                          onChange: function (e) { setCap(row, f, e.target.value); },
-                          className: inputClass("w-16 font-courier"),
-                        });
-                      }),
-                      h("button", {
-                        onClick: function () { saveCaps(row); },
-                        className: "border border-border px-2 py-1 text-xs font-courier hover:bg-foreground/10",
-                      }, "save")),
-                    h("span", { className: "text-[11px] text-muted-foreground" }, source))),
-                h("td", { className: "py-3" },
-                  isCli
-                    ? h(CliConfigure, { row: row, onChanged: props.onChanged })
-                    : isProvider
-                      ? h(KeyInput, { item: row, endpoint: "/providers/key", onChanged: props.onChanged })
-                      : isMedia
-                        ? h(KeyInput, { item: row, endpoint: "/media/key", onChanged: props.onChanged })
-                        : h("span", { className: "text-xs text-muted-foreground" }, "Configured")));
-            })))));
+      h(C.CardContent, { className: "flex flex-col gap-6 overflow-x-auto" },
+        STAGES.map(function (s) {
+          var list = groups[s[0]];
+          if (!list.length) return null;
+          return h("div", { key: s[0], className: "flex flex-col gap-2" },
+            h("div", { className: "flex items-baseline gap-2" },
+              h("span", { className: cn("font-courier text-sm", s[2]) }, s[1]),
+              h("span", { className: "text-[11px] text-muted-foreground" }, "(" + list.length + ")")),
+            h("div", { className: "text-[11px] text-muted-foreground" }, s[3]),
+            h("table", { className: "w-full min-w-[1040px] border-collapse text-sm" },
+              h("thead", null, headCells()),
+              h("tbody", null, list.map(rowEl))));
+        })));
   }
 
   // ── Category-wise routing: pick primary + fallback among eligible backends ──
   function CategoryMatrix(props) {
     var useCase = props.useCase;
-    var rows = (props.targets || []).filter(function (t) { return t.useCases.indexOf(useCase) >= 0; });
+    // Only Fleet-ready (promoted) backends are routable — no untested/uninstalled.
+    var rows = (props.targets || []).filter(function (t) {
+      return t.useCases.indexOf(useCase) >= 0 && fleetReady(t);
+    });
     var route = (props.routes || []).filter(function (r) { return r.use_case === useCase; })[0] || {
       use_case: useCase,
       mode: (props.useCaseDef && props.useCaseDef.default_mode) || "model",

@@ -90,14 +90,17 @@ First launch builds the web UI once, then opens `http://127.0.0.1:9119`.
 ### 5. Open the **CLI Governor** tab
 Right after **Skills** in the left nav. Two top-level tabs:
 
-- **Backends** — configure every backend once: CLIs, model providers, and media
-  in one table with status, **provenance** (verified · catalog · custom), the
-  categories it **Serves** (toggleable), credential slots, caps, usage, the
-  **guided install** stepper (for missing CLIs), **live "Check sign-in"**, and
-  key entry **with a "get key" link**.
+- **Backends** — grouped by a promotion flow so nothing is padded:
+  - **Fleet — verified & ready**: installed + verified (passed a live test),
+    authed models, configured media. Only these are routable.
+  - **Set up — verify or add a key**: detected/known but not promoted yet — run
+    **Check sign-in**, finish sign-in, or paste a key (**with a "get key" link**).
+  - **Install from catalog**: known CLIs you haven't installed — a **guided
+    step-by-step install**, then verify to promote.
+  A backend **rises into the Fleet only once it passes the test flow.**
 - **Routing** — per use case (**Coding, Chat, Image, Audio, Video, Research,
-  Docs, Automation, Other**), pick a **primary + fallback** among the backends
-  you enabled for that category.
+  Docs, Automation, Other**), pick a **primary + fallback** among the
+  **Fleet** backends enabled for that category (untested/uninstalled ones can't be routed).
 
 Detection, limits, install, routing, and media keys all work with **no model
 configured**. Caps are prefilled from the catalog/provider tier; saved values
