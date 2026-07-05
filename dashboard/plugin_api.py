@@ -192,7 +192,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "cursor-agent", "name": "Cursor CLI", "category": "AI Coding",
         "bin": "cursor-agent", "version_args": ["--version"], "auth": None,
-        "auth_hint": "Run Cursor CLI once and complete the account sign-in flow if prompted.",
+        "auth_command": "cursor-agent login",
+        "auth_hint": "Sign in with `cursor-agent login` (opens a browser), then Check sign-in.",
         "install": {"script": "curl https://cursor.com/install -fsS | bash"},
         "provider": None, "plan": "Subscription (Cursor)",
         "docs": "https://docs.cursor.com/en/cli/overview",
@@ -200,7 +201,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "amp", "name": "Amp (Sourcegraph)", "category": "AI Coding",
         "bin": "amp", "version_args": ["--version"], "auth": None,
-        "auth_hint": "Run Amp once and complete Sourcegraph authentication if prompted.",
+        "auth_command": "amp login",
+        "auth_hint": "Sign in with `amp login` (opens a browser), then Check sign-in.",
         "install": {"npm": "npm install -g @sourcegraph/amp"},
         "provider": None, "plan": "Free credits (Sourcegraph)",
         "docs": "https://ampcode.com",
@@ -208,7 +210,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "crush", "name": "Crush (Charm)", "category": "AI Coding",
         "bin": "crush", "version_args": ["--version"], "auth": None,
-        "auth_hint": "Configure a model provider key before routing work here.",
+        "auth_command": "crush login",
+        "auth_hint": "Sign in with `crush login` (or configure a provider key), then Check sign-in.",
         "install": {"npm": "npm install -g @charmland/crush",
                     "brew": "brew install charmbracelet/tap/crush"},
         "provider": None, "plan": "BYO key (multi-provider)",
@@ -282,7 +285,8 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
 
 # Delegation-capable worker CLIs, in fallback priority order (mirrors
 # __init__.py DELEGATE_ARGV + CODING_PRIORITY). Used to mark "workers" in scan.
-_DELEGATE_PRIORITY = ["codex", "claude", "qwen", "opencode", "antigravity"]
+_DELEGATE_PRIORITY = ["codex", "claude", "qwen", "opencode", "antigravity",
+                      "cursor-agent", "amp", "crush"]
 
 # Non-interactive argv for each worker CLI (mirrors __init__.py DELEGATE_ARGV).
 # Used by /install/assist to answer install questions through a governed worker
@@ -306,6 +310,8 @@ _CLI_TEST_ARGV = {
     "gemini": lambda b: [b, "-p", _CLI_PING],
     "antigravity": lambda b: [b, "-p", _CLI_PING],  # bin resolves to `agy`
     "cursor-agent": lambda b: [b, "-p", _CLI_PING],
+    "amp": lambda b: [b, "-x", _CLI_PING],
+    "crush": lambda b: [b, "run", _CLI_PING],
     "gh": lambda b: [b, "auth", "status"],
     "glab": lambda b: [b, "auth", "status"],
 }

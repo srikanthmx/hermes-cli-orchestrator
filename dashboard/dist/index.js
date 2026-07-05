@@ -523,7 +523,8 @@
     }
 
     var st = res && res.status;
-    return h("div", { className: "flex flex-col gap-1" },
+    var verified = row.provenance === "verified";
+    return h("div", { className: "flex flex-col gap-2" },
       h("div", { className: "flex flex-wrap items-center gap-2" },
         h("button", {
           onClick: runTest, disabled: busy,
@@ -535,17 +536,19 @@
         }, opening ? "opening…" : "Open app") : null,
         row.docs ? h("a", { href: row.docs, target: "_blank", rel: "noreferrer",
           className: "text-[11px] text-muted-foreground underline hover:text-foreground" }, "docs") : null),
+      // Always-visible sign-in path when not yet verified — never a dead end.
+      (!verified && row.auth_command) ? h("div", { className: "flex flex-col gap-1 border border-border bg-background/40 p-2" },
+        h("span", { className: "text-[11px] text-muted-foreground" },
+          (st === "needs_auth" ? "Not signed in. " : "") + "Sign in (opens a browser), then Check sign-in:"),
+        h(CopyCode, { text: row.auth_command }),
+        row.auth_hint ? h("span", { className: "text-[11px] text-muted-foreground" }, row.auth_hint) : null,
+        h(AiHelp, { row: row, label: "Ask AI to help sign in", question: "Walk me through signing in to this CLI and verifying it works." })) : null,
       st === "signed_in" ? h("div", { className: "text-[11px] text-emerald-300" }, "✓ Signed in & working — marked verified.") : null,
       st === "opened" ? h("div", { className: "text-[11px] text-muted-foreground" }, res.detail) : null,
-      (st === "needs_auth") ? h("div", { className: "flex flex-col gap-1 border border-amber-500/30 bg-amber-500/10 p-2" },
-        h("div", { className: "text-[11px] uppercase tracking-wider text-amber-300" }, "Not signed in"),
-        row.auth_command ? h("div", { className: "flex flex-col gap-1" },
-          h("span", { className: "text-[11px] text-muted-foreground" }, "Run this once, then re-check:"),
-          h(CopyCode, { text: row.auth_command })) : null,
-        h(AiHelp, { row: row, question: "This CLI reports it's not signed in. Give me the exact steps to authenticate it." })) : null,
-      (st === "manual" || st === "error") ? h("div", { className: "flex flex-col gap-1" },
+      // No auth_command AND the test couldn't run → still show detail + AI help.
+      (!row.auth_command && (st === "manual" || st === "error" || st === "needs_auth")) ? h("div", { className: "flex flex-col gap-1" },
         h("pre", { className: "max-h-32 overflow-auto whitespace-pre-wrap font-courier text-[10px] text-muted-foreground" }, res.detail || ""),
-        st === "error" ? h(AiHelp, { row: row, question: "This CLI test failed with the output above. What's wrong and how do I fix it?" }) : null) : null);
+        h(AiHelp, { row: row, question: "This CLI isn't set up. What's the exact way to authenticate/configure it?" })) : null);
   }
 
   function CliConfigure(props) {

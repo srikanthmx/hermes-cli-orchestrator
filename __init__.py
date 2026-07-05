@@ -65,6 +65,9 @@ DELEGATE_ARGV = {
     "qwen": lambda task: ["qwen", "-p", task],
     "opencode": lambda task: ["opencode", "run", task],
     "antigravity": lambda task: ["agy", "-p", task],
+    "cursor-agent": lambda task: ["cursor-agent", "-p", task],
+    "amp": lambda task: ["amp", "-x", task],
+    "crush": lambda task: ["crush", "run", task],
 }
 # Substrings that indicate a CLI hit a rate/quota limit → fall back to the next.
 RATE_LIMIT_PATTERNS = (
