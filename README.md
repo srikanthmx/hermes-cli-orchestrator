@@ -195,13 +195,20 @@ land in chat history) — set those on the loopback dashboard.
 
 ## Media backends — what works today
 
+Verified end-to-end on this build (real round-trip, not just "it imports"):
+
 | Category | Backend | Status |
 |---|---|---|
-| **Voice / TTS** | Edge TTS (Hermes native) | ✅ **working, free, no key** (verified) |
-| **Speech-to-Text** | faster-whisper (Hermes native `local`) | ✅ **working, free, no key** (verified) |
-| **Image** | Pollinations (`backends/image_gen/pollinations`) | ✅ **working, free, no key** (verified) |
-| **Video** | fal (`backends/video_gen/fal`) + 9 more key-configurable | ⚙️ wired + registers; `generate()` **unverified — needs a key** |
-| **Music** | `generate_music` tool (Replicate MusicGen) + 7 more | ⚙️ wired; generation **unverified — needs a key** |
+| **Image** | Pollinations (`backends/image_gen/pollinations`) | ✅ **ran** — generated a real 256×256 JPEG, free, keyless |
+| **Voice / TTS** | Edge TTS (`edge_tts` module) | ✅ **ran** — produced a real MP3, free, no key (needs the `edge_tts` dep installed) |
+| **Speech-to-Text** | faster-whisper (`local`) | ✅ **ran** — transcribed the TTS audio back accurately, free (needs `faster_whisper` installed) |
+| **Video** | fal (`backends/video_gen/fal`) + 9 more key-configurable | ⚙️ wired + registers; `generate()` **NOT run — needs a key** |
+| **Music** | `generate_music` tool (Replicate MusicGen) + 7 more | ⚙️ wired; generation **NOT run — needs a key** |
+
+Also verified end-to-end this build: **code delegation** (a real coding task via `agy`
+returned a correct function). **Not** exercised: a full chat turn through the model chain
+(would burn the scarce Codex quota), and cross-model fallback (only Codex/Copilot/Ollama
+are currently authed).
 
 The panel manages keys for **all** providers (fal, Replicate, Runway, Luma, Kling,
 MiniMax, Pika, Haiper, Veo, Sora; Suno, Udio, ElevenLabs Music, Stable Audio, Mubert,

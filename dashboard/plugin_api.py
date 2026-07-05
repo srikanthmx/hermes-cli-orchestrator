@@ -1220,7 +1220,7 @@ async def health():
 MEDIA_CATALOG: List[Dict[str, Any]] = [
     # ── Voice / TTS ──────────────────────────────────────────────────────────
     {"id": "edge", "name": "Edge TTS (free)", "category": "Voice / TTS", "kind": "native",
-     "mechanism": "Hermes default TTS — free, no key (verified)", "env": [], "keyless": True,
+     "mechanism": "Hermes default TTS — free, no key", "env": [], "module": "edge_tts",
      "signup": "", "docs": "https://github.com/rany2/edge-tts"},
     {"id": "elevenlabs", "name": "ElevenLabs", "category": "Voice / TTS", "kind": "native",
      "mechanism": "TTS provider", "env": ["ELEVENLABS_API_KEY"],
