@@ -47,13 +47,12 @@ DELEGATION_HINTS = {
     "amp": "run `amp -x \"<task>\"` via the terminal tool",
     "cursor-agent": "run `cursor-agent -p \"<task>\"` via the terminal tool",
     "goose": "run `goose run -t \"<task>\"` via the terminal tool",
-    "aider": "run `aider --message \"<task>\"` via the terminal tool",
     "copilot": "use the `copilot` CLI via the terminal tool",
 }
 # Capable coding CLIs, in default priority order (used when no explicit
 # orchestration-matrix rule maps an intent to a CLI).
 CODING_PRIORITY = ("codex", "claude", "qwen", "opencode", "antigravity",
-                   "crush", "amp", "cursor-agent", "goose", "aider", "copilot")
+                   "crush", "amp", "cursor-agent", "goose", "copilot")
 
 # Non-interactive one-shot invocation per CLI, as argv lists (no shell → no
 # injection). The task is passed as a single argument. Only CLIs with a clean
@@ -86,7 +85,6 @@ TRACKED_BINS = {
     "mods": "mods",
     "llm": "llm",
     "opencode": "opencode",
-    "aider": "aider",
     "copilot": "copilot",
     "gh": "gh",
     "glab": "glab",

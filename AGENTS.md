@@ -103,6 +103,31 @@ Priority order — these deliver the North Star:
 
 ---
 
+## 5b. Keeping the catalog current — the `catalog-refresh` skill
+
+The catalog is meant to be **living**. `skills/catalog-refresh/SKILL.md` is the
+procedure: research current AI CLIs + free/cheap providers, add/configure the ones
+with a **headless mode** (so they can be delegate workers), **verify with a real
+one-shot call before marking verified**, and **prune the dead weight**. Prune
+criteria: no headless mode (interactive-only), dead free tier, superseded, or
+heavy config with no governance benefit. Already actioned: **`aider` removed**
+(interactive git-centric pair-programmer, not a stateless delegate worker).
+
+Verified end-to-end this build (real runs, not endpoint checks): **code** (`agy`
+wrote a correct function), **image** (Pollinations JPEG), **TTS** (edge_tts MP3),
+**STT** (faster_whisper transcribed it back). NOT verified: video/music (need
+keys), and see the chat finding below.
+
+## 5c. KNOWN BROKEN (2026-07): chat has no working fallback
+
+`hermes -z "..."` failed with **"Codex provider quota exhausted (429); retry after
+~2.1M s (~25 days)"** and **did not fall back** to anything. Forcing Ollama via
+`--provider custom -m ...` gave "No LLM provider configured." So **chat is
+currently dead**: the primary (Codex) is capped for ~25 days and Hermes-native
+`fallback` did NOT rotate off it. This is the loudest evidence for roadmap #1
+(auto-cooldown skip + making rotation actually fire on a hard 429). Do not claim
+"never hits a wall" until this works.
+
 ## 6. Current live state (dev machine, keep updated)
 
 - Authed model providers: **Codex, Copilot, Ollama** only. The ~10 free/trial providers need API keys (get-key links are in the UI).

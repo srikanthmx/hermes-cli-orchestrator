@@ -222,14 +222,9 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "provider": None, "plan": "BYO key (Block)",
         "docs": "https://block.github.io/goose/",
     },
-    {
-        "id": "aider", "name": "Aider", "category": "AI Coding",
-        "bin": "aider", "version_args": ["--version"], "auth": None,
-        "auth_hint": "Configure Aider's provider key before routing work here.",
-        "install": {"brew": "brew install aider", "pipx": "pipx install aider-chat"},
-        "provider": None, "plan": "BYO key",
-        "docs": "https://aider.chat",
-    },
+    # aider removed — interactive, git-repo-centric pair-programmer, not a
+    # clean stateless delegation worker for this plugin's use case. See the
+    # catalog-refresh skill for the pruning criteria.
     # ── AI tools / chat ───────────────────────────────────────────────────────
     {
         "id": "mods", "name": "Mods (Charm)", "category": "AI Tools",

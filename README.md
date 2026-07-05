@@ -29,7 +29,7 @@ app's integrated terminal). We don't reinvent those. What this plugin adds on to
 - **Live "Check sign-in"** — a real one-shot call through the CLI to confirm it's authenticated and working; passing auto-marks it **verified**.
 - **Rate-limit guardrails** — hourly / daily / monthly caps per backend, with usage gauges.
 - **Guided install** — a numbered stepper (prereq check → command with copy → live log → auth → verify) and an AI-assisted help button.
-- **19-CLI catalog** — Claude Code, Codex, **Antigravity CLI (`agy`)** + **Antigravity IDE**, Gemini, Qwen, Copilot, OpenCode, Cursor, Amp, Crush, Goose, Aider, mods, llm, gh, glab, Ollama, Hermes.
+- **18-CLI catalog** — Claude Code, Codex, **Antigravity CLI (`agy`)** + **Antigravity IDE**, Gemini, Qwen, Copilot, OpenCode, Cursor, Amp, Crush, Goose, mods, llm, gh, glab, Ollama, Hermes. The catalog is **kept current** by the `catalog-refresh` skill (researches new CLIs/models, adds/configures, prunes dead ones — `aider` was pruned as an interactive-only pair-programmer, not a delegation worker).
 
 **Delegation & routing**
 - **`cli_delegate` tool + `/cli-delegate` command** — put a local CLI to work with cap-skip, cross-CLI fallback, and usage recording.
