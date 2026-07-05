@@ -1839,3 +1839,139 @@ async def gateway_restart():
         return {"ok": True, "method": "pkill (launchd will relaunch)", "gateway": _gateway_status()}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"could not restart gateway: {exc}")
+
+
+# ── Credential pool: multiple accounts/keys per provider (hermes auth) ──────
+
+def _hermes_bin() -> Optional[str]:
+    return shutil.which("hermes", path=_assist_path())
+
+
+def _run_hermes_auth(args: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    hb = _hermes_bin()
+    if not hb:
+        raise HTTPException(500, "`hermes` CLI not found on PATH")
+    env = dict(os.environ)
+    env["PATH"] = _assist_path()
+    return subprocess.run([hb, "auth"] + args, capture_output=True, text=True,
+                          timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+
+
+_EXHAUST_WORDS = ("rate-limited", "usage_limit", "429", "exhausted", "quota")
+
+
+def _parse_auth_list(text: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Parse `hermes auth list` text into {provider: [ {index, raw, active,
+    exhausted, detail} ]}."""
+    import re
+    pool: Dict[str, List[Dict[str, Any]]] = {}
+    cur = None
+    hdr = re.compile(r"^(\S+)\s+\(\d+\s+credential")
+    cred = re.compile(r"^\s+#(\d+)\s+(.*)$")
+    for line in (text or "").splitlines():
+        mh = hdr.match(line)
+        if mh:
+            cur = mh.group(1)
+            pool[cur] = []
+            continue
+        mc = cred.match(line)
+        if mc and cur is not None:
+            raw = mc.group(2).strip()
+            low = raw.lower()
+            tl = re.search(r"\(([^)]*left)\)", raw)
+            pool[cur].append({
+                "index": int(mc.group(1)),
+                "raw": raw.replace("←", "").strip(),
+                "active": "←" in raw,
+                "exhausted": any(w in low for w in _EXHAUST_WORDS),
+                "detail": tl.group(1) if tl else "",
+            })
+    return pool
+
+
+@router.get("/auth/pool")
+async def auth_pool():
+    """Pooled credentials per provider (multiple accounts/keys, exhaustion)."""
+    try:
+        p = _run_hermes_auth(["list"], timeout=20)
+        return {"pool": _parse_auth_list(p.stdout or p.stderr or "")}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "hermes auth list timed out")
+
+
+class AuthAddKeyBody(BaseModel):
+    provider: str
+    api_key: str
+    label: Optional[str] = None
+
+
+@router.post("/auth/add-key")
+async def auth_add_key(body: AuthAddKeyBody):
+    """Add another API-key account to a provider's pool (non-interactive).
+    Works for api-key providers and Copilot/GitHub tokens."""
+    prov = body.provider.strip()
+    if not prov or not body.api_key.strip():
+        raise HTTPException(400, "provider and api_key required")
+    args = ["add", prov, "--type", "api-key", "--api-key", body.api_key.strip()]
+    if body.label:
+        args += ["--label", body.label.strip()]
+    p = _run_hermes_auth(args, timeout=60)
+    out = (p.stdout or "").strip() + (("\n" + p.stderr.strip()) if p.stderr else "")
+    return {"ok": p.returncode == 0, "output": out[-1500:]}
+
+
+class AuthProviderBody(BaseModel):
+    provider: str
+    target: Optional[str] = None  # for remove: index / id / label
+
+
+@router.post("/auth/add-oauth")
+async def auth_add_oauth(body: AuthProviderBody):
+    """Start an OAuth device-code login to add another account (e.g. a second
+    Codex/ChatGPT). Runs detached; poll /auth/add-oauth/status for the code+URL."""
+    prov = body.provider.strip()
+    if not prov:
+        raise HTTPException(400, "provider required")
+    hb = _hermes_bin()
+    if not hb:
+        raise HTTPException(500, "`hermes` CLI not found")
+    env = dict(os.environ); env["PATH"] = _assist_path()
+    log = logs_dir() / f"authadd-{prov}.log"
+    with open(log, "w", encoding="utf-8") as fh:
+        proc = subprocess.Popen(
+            [hb, "auth", "add", prov, "--type", "oauth", "--no-browser"],
+            stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            env=env, start_new_session=True)
+    (logs_dir() / f"authadd-{prov}.pid").write_text(str(proc.pid), encoding="utf-8")
+    return {"ok": True, "provider": prov, "note": "Login started — poll status for the code + URL."}
+
+
+@router.get("/auth/add-oauth/status")
+async def auth_add_oauth_status(provider: str):
+    log = logs_dir() / f"authadd-{provider}.log"
+    pid_f = logs_dir() / f"authadd-{provider}.pid"
+    running = False
+    if pid_f.exists():
+        try:
+            os.kill(int(pid_f.read_text().strip()), 0)
+            running = True
+        except Exception:
+            running = False
+    text = log.read_text(encoding="utf-8") if log.exists() else ""
+    return {"running": running, "log": text[-3000:]}
+
+
+@router.post("/auth/reset")
+async def auth_reset(body: AuthProviderBody):
+    """Clear the exhaustion/rate-limited flag for a provider's credentials so
+    Hermes retries them. (Does NOT create quota — only clears a stale flag.)"""
+    p = _run_hermes_auth(["reset", body.provider.strip()], timeout=30)
+    return {"ok": p.returncode == 0, "output": ((p.stdout or "") + (p.stderr or "")).strip()[-800:]}
+
+
+@router.post("/auth/remove")
+async def auth_remove(body: AuthProviderBody):
+    if not body.target:
+        raise HTTPException(400, "target (index/id/label) required")
+    p = _run_hermes_auth(["remove", body.provider.strip(), str(body.target).strip()], timeout=30)
+    return {"ok": p.returncode == 0, "output": ((p.stdout or "") + (p.stderr or "")).strip()[-800:]}

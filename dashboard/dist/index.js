@@ -970,6 +970,104 @@
             }))))));
   }
 
+  // Per-provider account management: add another key/login, reset, remove.
+  function ProviderAccounts(props) {
+    var p = props.provider;
+    var accounts = props.accounts || [];
+    var showKeySt = useState(false); var showKey = showKeySt[0], setShowKey = showKeySt[1];
+    var keySt = useState(""); var keyv = keySt[0], setKeyv = keySt[1];
+    var labelSt = useState(""); var label = labelSt[0], setLabel = labelSt[1];
+    var busySt = useState(""); var busy = busySt[0], setBusy = busySt[1];
+    var msgSt = useState(""); var msg = msgSt[0], setMsg = msgSt[1];
+    var oauthSt = useState(null); var oauth = oauthSt[0], setOauth = oauthSt[1];
+
+    function reload() { if (props.onChanged) props.onChanged(); }
+    function addKey() {
+      if (!keyv.trim()) return;
+      setBusy("key"); setMsg("");
+      postJSON("/auth/add-key", { provider: p.id, api_key: keyv.trim(), label: label.trim() })
+        .then(function (r) { setMsg(r.ok ? "Added." : ("Failed: " + (r.output || ""))); setKeyv(""); setLabel(""); setShowKey(false); reload(); })
+        .catch(function (e) { setMsg("Failed: " + e); })
+        .finally(function () { setBusy(""); });
+    }
+    function pollOauth() {
+      getJSON("/auth/add-oauth/status?provider=" + encodeURIComponent(p.id)).then(function (s) {
+        setOauth(s);
+        if (s.running) setTimeout(pollOauth, 2000);
+        else { setMsg("Login finished — check the pool."); reload(); }
+      }).catch(function () {});
+    }
+    function startOauth() {
+      setBusy("oauth"); setMsg(""); setOauth({ running: true, log: "starting login…" });
+      postJSON("/auth/add-oauth", { provider: p.id })
+        .then(function () { pollOauth(); })
+        .catch(function (e) { setMsg("Failed: " + e); setOauth(null); })
+        .finally(function () { setBusy(""); });
+    }
+    function reset() {
+      setBusy("reset"); setMsg("");
+      postJSON("/auth/reset", { provider: p.id })
+        .then(function () { setMsg("Exhaustion cleared."); reload(); })
+        .catch(function (e) { setMsg("Failed: " + e); })
+        .finally(function () { setBusy(""); });
+    }
+    function remove(idx) {
+      setBusy("rm" + idx);
+      postJSON("/auth/remove", { provider: p.id, target: String(idx) })
+        .then(function () { reload(); })
+        .catch(function (e) { setMsg("Failed: " + e); })
+        .finally(function () { setBusy(""); });
+    }
+
+    var canKey = p.auth === "api_key" || p.id === "copilot";
+    var canOauth = p.auth === "oauth";
+    return h("div", { className: "flex flex-col gap-2 border border-border p-3" },
+      h("div", { className: "flex flex-wrap items-center justify-between gap-2" },
+        h("div", { className: "font-courier text-sm" }, p.name),
+        h("span", { className: "text-[11px] text-muted-foreground" }, accounts.length + " account" + (accounts.length === 1 ? "" : "s"))),
+      accounts.length ? h("div", { className: "flex flex-col gap-1" }, accounts.map(function (a) {
+        return h("div", { key: a.index, className: "flex flex-wrap items-center gap-2 text-[11px]" },
+          h("span", { className: "font-courier text-muted-foreground" }, "#" + a.index),
+          a.active ? pill("active", "ok") : null,
+          a.exhausted ? pill("cooldown" + (a.detail ? " " + a.detail : ""), "warn") : null,
+          h("span", { className: "min-w-0 truncate font-courier text-muted-foreground" }, a.raw),
+          h("button", { onClick: function () { remove(a.index); }, disabled: busy === "rm" + a.index,
+            className: "border border-border px-1.5 py-0.5 font-courier text-muted-foreground hover:bg-foreground/10 disabled:opacity-40" }, "remove"));
+      })) : h("span", { className: "text-[11px] text-muted-foreground" }, "No pooled accounts."),
+      h("div", { className: "flex flex-wrap items-center gap-2" },
+        canKey ? h("button", { onClick: function () { setShowKey(!showKey); },
+          className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-courier text-emerald-300 hover:bg-emerald-500/20" }, showKey ? "cancel" : "+ Add API key") : null,
+        canOauth ? h("button", { onClick: startOauth, disabled: busy === "oauth",
+          className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40" }, busy === "oauth" ? "starting…" : "+ Add login (another account)") : null,
+        accounts.some(function (a) { return a.exhausted; }) ? h("button", { onClick: reset, disabled: busy === "reset",
+          className: "border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] font-courier text-amber-300 hover:bg-amber-500/20 disabled:opacity-40" }, busy === "reset" ? "…" : "Reset exhaustion") : null,
+        msg ? h("span", { className: "text-[11px] text-muted-foreground" }, msg) : null),
+      showKey ? h("div", { className: "flex flex-wrap items-center gap-2" },
+        h("input", { type: "password", value: keyv, placeholder: (p.env || "API key"),
+          onChange: function (e) { setKeyv(e.target.value); }, className: inputClass("min-w-[220px] font-courier") }),
+        h("input", { value: label, placeholder: "label (optional)",
+          onChange: function (e) { setLabel(e.target.value); }, className: inputClass("w-40 font-courier") }),
+        h("button", { onClick: addKey, disabled: busy === "key" || !keyv.trim(),
+          className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40" }, busy === "key" ? "…" : "save")) : null,
+      oauth ? h("div", { className: "flex flex-col gap-1 border border-sky-500/30 bg-sky-500/5 p-2" },
+        h("span", { className: "text-[10px] uppercase tracking-wider text-sky-300" }, oauth.running ? "Complete the login in your browser" : "Login result"),
+        h("pre", { className: "max-h-40 overflow-auto whitespace-pre-wrap font-courier text-[11px] text-muted-foreground" }, oauth.log || "")) : null);
+  }
+
+  function CredentialPool(props) {
+    var pool = props.pool || {};
+    var providers = (props.providers || []).filter(function (p) { return p.auth === "api_key" || p.auth === "oauth"; });
+    return h(C.Card, null,
+      h(C.CardHeader, { className: "pb-2" },
+        h("div", { className: "min-w-0" },
+          h(C.CardTitle, { className: "font-courier text-base" }, "Credential pool — multiple accounts per brain"),
+          h("div", { className: "text-[11px] text-muted-foreground" }, "Add a second Codex/Copilot login or another API key. Hermes rotates across them and skips exhausted ones automatically."))),
+      h(C.CardContent, { className: "grid grid-cols-1 gap-3 md:grid-cols-2" },
+        providers.map(function (p) {
+          return h(ProviderAccounts, { key: p.id, provider: p, accounts: pool[p.id] || [], onChanged: props.onChanged });
+        })));
+  }
+
   function App() {
     var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
     var mediaSt = useState([]); var media = mediaSt[0], setMedia = mediaSt[1];
@@ -979,6 +1077,7 @@
     var routesSt = useState([]); var routes = routesSt[0], setRoutes = routesSt[1];
     var capsSt = useState({}); var capsEnabled = capsSt[0], setCapsEnabled = capsSt[1];
     var brainSt = useState(null); var brain = brainSt[0], setBrain = brainSt[1];
+    var poolSt = useState({}); var pool = poolSt[0], setPool = poolSt[1];
     var customLocalSt = useState(false); var customLocal = customLocalSt[0], setCustomLocal = customLocalSt[1];
     var activeSt = useState("coding"); var active = activeSt[0], setActive = activeSt[1];
     var viewSt = useState("backends"); var view = viewSt[0], setView = viewSt[1];
@@ -995,6 +1094,7 @@
         getJSON("/use-cases"),
         getJSON("/capabilities"),
         getJSON("/brain"),
+        getJSON("/auth/pool"),
       ]).then(function (res) {
         setClis((res[0] && res[0].clis) || []);
         setMedia((res[1] && res[1].media) || []);
@@ -1005,6 +1105,7 @@
         setCustomLocal(!!(res[4] && res[4].show_custom_local));
         setCapsEnabled((res[5] && res[5].capabilities) || {});
         setBrain(res[6] || null);
+        setPool((res[7] && res[7].pool) || {});
       }).catch(function (e) {
         setErr(String(e));
       }).finally(function () {
@@ -1073,8 +1174,10 @@
         // 1) Single, unified config for every backend.
         ? h(BackendsConfig, { targets: targets, onChanged: load })
       : view === "brains"
-        // 1b) Brain routing: primary model + gateway restart.
-        ? h(BrainsPanel, { brain: brain, providers: providers, onChanged: load })
+        // 1b) Brain routing: primary model + gateway restart + credential pool.
+        ? h("div", { className: "flex flex-col gap-5" },
+            h(BrainsPanel, { brain: brain, providers: providers, onChanged: load }),
+            h(CredentialPool, { pool: pool, providers: providers, onChanged: load }))
         // 2) Category-wise routing.
         : h("div", { className: "flex flex-col gap-5" },
             h("div", { className: "flex flex-col gap-1" },
