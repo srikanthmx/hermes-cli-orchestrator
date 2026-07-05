@@ -281,6 +281,61 @@ hermes-cli-orchestrator/
 
 ---
 
+## Gaps & FAQ (read this)
+
+**Q: I routed a CLI (e.g. amp) — why doesn't my chat / cron use it?**
+Because a CLI is a **worker**, not a **brain**. The **Routing** tab drives `cli_delegate`
+(delegating *tasks* to CLIs). Chat and crons reason with a **model provider** (the brain)
+from `config.yaml`. A CLI can never be the chat/cron brain — set the brain in the
+**Brains** tab. (This is the single most common confusion; see the one-liner at the top.)
+
+**Q: I switched the brain / added a key — nothing changed. Why?**
+Two caches:
+- **The gateway loads config once, at start.** After a brain switch, click **Restart
+  gateway** (Brains tab) or it keeps using the old brain. Crons + chat run through the gateway.
+- **Backend Python loads once, at process start.** If you change `plugin_api.py` /
+  `__init__.py`, **restart the dashboard/gateway** — a browser refresh only reloads the
+  JavaScript, not the Python.
+
+**Q: My cron says "Skipped… config drifted… unpinned" — is it broken?**
+No — that's Hermes's **drift-guard (#44585)**: it refuses to run an *unpinned* cron after
+the global brain changes, as a spend-safety. Fix: **pin the cron** to a model. The Brains
+tab **auto-repins enabled crons** whenever you switch the primary, so this shouldn't recur.
+
+**Q: Codex is capped for ~a month and nothing rotates — isn't this "never hits a wall"?**
+Honest gap. Two facts: (1) **Hermes does not fail over on a hard-quota 429** (Codex's
+"retry after N days") — it treats it as fatal, so adding fallbacks doesn't help; you must
+**promote a healthy brain to primary** (Brains tab, or the auto-heal engine). (2) The
+**auto-detection of Codex's death is NOT built yet** — Codex's quota error is raised in
+Hermes's auth layer (`auth.py`), *before* any API request, so no plugin hook (including
+`api_request_error`) can catch it. The auto-heal engine *promotes/restores* correctly and
+*proactively* skips a **recorded** cooldown at session start, but recording Codex's
+cooldown automatically needs a background health-probe/log-watcher (**roadmap**). Until
+then, switch the brain in the Brains tab when Codex caps.
+
+**Q: The CLI catalog lists things I haven't verified — is that padding?**
+No. The **Backends** tab is staged: **Install → Set up (verify / add key) → Fleet**. A
+backend only enters the **Fleet** (and becomes routable) once it **passes a live sample
+reply** (Check sign-in) / auth. The catalog is the browse+install surface; the Fleet is
+what actually works. The `catalog-refresh` skill keeps the catalog current and prunes
+dead entries (e.g. `aider` was removed; `hermes`/host is not catalogued).
+
+**Q: Does this work in the Hermes desktop app?**
+The **runtime** (delegation, `/cli-*` commands, hooks) works there — same backend. But the
+**dashboard tab is web-only**: the desktop app renders its own native UI and does not host
+dashboard plugins. Use `hermes dashboard` (browser) for the CLI Governor UI.
+
+**Q: The "Restart gateway" button — will it always work?**
+It uses `launchctl kickstart` on the `ai.hermes.gateway` launchd service (falls back to
+`pkill`, which launchd relaunches). If your gateway isn't run as that service, restart it
+however you started it.
+
+### Not built yet (roadmap — don't expect these to work)
+- **Auto-detect Codex/auth-layer exhaustion** and record its cooldown (needs a health-probe/log-watcher). The promote/restore engine + proactive session-start skip are built.
+- **One-click free-first chain builder** and **multi-key/multi-account pooling** wrappers (rotation itself is Hermes-native `fallback`/`auth`).
+
+---
+
 ## License
 
 MIT
