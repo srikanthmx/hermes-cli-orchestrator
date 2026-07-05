@@ -877,6 +877,99 @@
                 })))));
   }
 
+  function fmtCooldown(secs) {
+    secs = Math.max(0, secs || 0);
+    if (secs >= 86400) return Math.round(secs / 86400) + "d";
+    if (secs >= 3600) return Math.round(secs / 3600) + "h";
+    if (secs >= 60) return Math.round(secs / 60) + "m";
+    return secs + "s";
+  }
+
+  // ── Brain routing: pick the primary model + restart the gateway ────────────
+  function BrainsPanel(props) {
+    var brain = props.brain || {};
+    var providers = props.providers || [];
+    var busySt = useState(""); var busy = busySt[0], setBusy = busySt[1];
+    var msgSt = useState(""); var msg = msgSt[0], setMsg = msgSt[1];
+    var primary = brain.primary || {};
+    var gw = brain.gateway || {};
+
+    function makePrimary(p) {
+      setBusy("primary:" + p.id); setMsg("");
+      postJSON("/brain/primary", { provider: p.id, model: p.model })
+        .then(function (r) {
+          setMsg("Primary → " + p.name + ". " + (r.crons_repinned ? r.crons_repinned + " cron(s) re-pinned. " : "") + "Now restart the gateway to apply.");
+          if (props.onChanged) props.onChanged();
+        })
+        .catch(function (e) { setMsg("Failed: " + e); })
+        .finally(function () { setBusy(""); });
+    }
+    function restartGateway() {
+      setBusy("gw"); setMsg("Restarting gateway…");
+      postJSON("/gateway/restart", {})
+        .then(function (r) { setMsg("Gateway restarted (" + (r.method || "ok") + ") — new brain is live."); })
+        .catch(function (e) { setMsg("Restart failed: " + e); })
+        .finally(function () { setTimeout(function () { setBusy(""); if (props.onChanged) props.onChanged(); }, 2500); });
+    }
+
+    return h(C.Card, null,
+      h(C.CardHeader, { className: "pb-2" },
+        h("div", { className: "flex flex-wrap items-center justify-between gap-3" },
+          h("div", { className: "min-w-0" },
+            h(C.CardTitle, { className: "font-courier text-base" }, "Brain routing"),
+            h("div", { className: "text-[11px] text-muted-foreground" }, "The model Hermes reasons with (chat + crons). Switch the primary brain when one is capped, then restart the gateway to apply.")),
+          msg ? h("span", { className: "max-w-[420px] text-xs text-muted-foreground" }, msg) : null)),
+      h(C.CardContent, { className: "flex flex-col gap-4" },
+        h("div", { className: "grid grid-cols-1 gap-3 md:grid-cols-2" },
+          h("div", { className: "border border-emerald-500/30 bg-emerald-500/5 p-3" },
+            h("div", { className: "text-[10px] uppercase tracking-wider text-muted-foreground" }, "Primary brain"),
+            h("div", { className: "font-courier text-lg text-emerald-300" },
+              (primary.provider || "—") + (primary.model ? " / " + primary.model : ""))),
+          h("div", { className: "flex flex-col gap-2 border border-border p-3" },
+            h("div", { className: "flex items-start justify-between gap-2" },
+              h("div", { className: "min-w-0" },
+                h("div", { className: "text-[10px] uppercase tracking-wider text-muted-foreground" }, "Gateway (runs crons + chat)"),
+                h("div", { className: "font-courier text-sm" }, gw.running === false ? "stopped" : gw.running ? "running" : "unknown"),
+                gw.started ? h("div", { className: "truncate text-[11px] text-muted-foreground" }, "since " + gw.started) : null),
+              h("button", {
+                onClick: restartGateway, disabled: busy === "gw",
+                className: "shrink-0 border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-courier text-amber-300 hover:bg-amber-500/20 disabled:opacity-40",
+              }, busy === "gw" ? "restarting…" : "Restart gateway")),
+            h("div", { className: "text-[11px] text-muted-foreground" }, "A brain switch (or cooldown swap) only takes effect after a gateway restart."))),
+        h("div", { className: "overflow-x-auto" },
+          h("table", { className: "w-full min-w-[720px] border-collapse text-sm" },
+            h("thead", null,
+              h("tr", { className: "border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground" },
+                h("th", { className: "py-2 pr-3" }, "Brain"),
+                h("th", { className: "py-2 pr-3" }, "Tier"),
+                h("th", { className: "py-2 pr-3" }, "Status"),
+                h("th", { className: "py-2 pr-3" }, "Chain"),
+                h("th", { className: "py-2" }, "Action"))),
+            h("tbody", null, providers.map(function (p) {
+              var isPrimary = p.id === primary.provider;
+              var cooling = p.cooling_down;
+              return h("tr", { key: p.id, className: "border-b border-border/60" },
+                h("td", { className: "py-3 pr-3" },
+                  h("div", { className: "flex flex-wrap items-center gap-2" },
+                    h("span", { className: "font-courier text-sm" }, p.name),
+                    p.model ? h("span", { className: "text-[11px] text-muted-foreground" }, p.model) : null)),
+                h("td", { className: "py-3 pr-3 text-xs text-muted-foreground" }, p.tier),
+                h("td", { className: "py-3 pr-3" },
+                  cooling ? pill("cooldown " + fmtCooldown(p.cooldown_remaining_s), "warn")
+                    : p.authed ? pill("authed", "ok")
+                      : pill(p.auth === "oauth" ? "login needed" : "no key", "neutral")),
+                h("td", { className: "py-3 pr-3 text-[11px] text-muted-foreground" }, p.position || "—"),
+                h("td", { className: "py-3" },
+                  isPrimary ? pill("primary", "ok")
+                    : h("button", {
+                        onClick: function () { makePrimary(p); },
+                        disabled: !p.authed || cooling || busy === "primary:" + p.id,
+                        title: !p.authed ? "Authenticate this brain first" : cooling ? "On cooldown" : "Promote to primary",
+                        className: "border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-courier text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40",
+                      }, busy === "primary:" + p.id ? "…" : "Make primary")));
+            }))))));
+  }
+
   function App() {
     var clisSt = useState([]); var clis = clisSt[0], setClis = clisSt[1];
     var mediaSt = useState([]); var media = mediaSt[0], setMedia = mediaSt[1];
@@ -885,6 +978,7 @@
     var useCasesSt = useState([]); var useCases = useCasesSt[0], setUseCases = useCasesSt[1];
     var routesSt = useState([]); var routes = routesSt[0], setRoutes = routesSt[1];
     var capsSt = useState({}); var capsEnabled = capsSt[0], setCapsEnabled = capsSt[1];
+    var brainSt = useState(null); var brain = brainSt[0], setBrain = brainSt[1];
     var customLocalSt = useState(false); var customLocal = customLocalSt[0], setCustomLocal = customLocalSt[1];
     var activeSt = useState("coding"); var active = activeSt[0], setActive = activeSt[1];
     var viewSt = useState("backends"); var view = viewSt[0], setView = viewSt[1];
@@ -900,6 +994,7 @@
         getJSON("/health"),
         getJSON("/use-cases"),
         getJSON("/capabilities"),
+        getJSON("/brain"),
       ]).then(function (res) {
         setClis((res[0] && res[0].clis) || []);
         setMedia((res[1] && res[1].media) || []);
@@ -909,6 +1004,7 @@
         setRoutes((res[4] && res[4].routes) || []);
         setCustomLocal(!!(res[4] && res[4].show_custom_local));
         setCapsEnabled((res[5] && res[5].capabilities) || {});
+        setBrain(res[6] || null);
       }).catch(function (e) {
         setErr(String(e));
       }).finally(function () {
@@ -960,24 +1056,25 @@
       // Top-level tabs — Backends (config) first in its own color, Routing next.
       // Keeps the routing matrix one click away instead of a long scroll.
       h("div", { className: "flex flex-wrap gap-2" },
-        [["backends", "Backends"], ["routing", "Routing"]].map(function (v) {
+        [["backends", "Backends"], ["brains", "Brains"], ["routing", "Routing"]].map(function (v) {
           var isActive = view === v[0];
-          var isBackends = v[0] === "backends";
+          var tone = v[0] === "backends" ? "border-sky-500/60 bg-sky-500/20 text-sky-200"
+            : v[0] === "brains" ? "border-violet-500/60 bg-violet-500/20 text-violet-200"
+            : "border-emerald-500/50 bg-emerald-500/15 text-emerald-200";
           return h("button", {
             key: v[0],
             onClick: function () { setView(v[0]); },
             className: cn("border px-4 py-2 text-sm font-courier",
-              isActive
-                ? (isBackends
-                    ? "border-sky-500/60 bg-sky-500/20 text-sky-200"
-                    : "border-emerald-500/50 bg-emerald-500/15 text-emerald-200")
-                : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
+              isActive ? tone : "border-border bg-background/40 text-muted-foreground hover:bg-foreground/10"),
           }, v[1]);
         })),
 
       view === "backends"
         // 1) Single, unified config for every backend.
         ? h(BackendsConfig, { targets: targets, onChanged: load })
+      : view === "brains"
+        // 1b) Brain routing: primary model + gateway restart.
+        ? h(BrainsPanel, { brain: brain, providers: providers, onChanged: load })
         // 2) Category-wise routing.
         : h("div", { className: "flex flex-col gap-5" },
             h("div", { className: "flex flex-col gap-1" },

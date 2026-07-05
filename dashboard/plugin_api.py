@@ -1721,3 +1721,121 @@ async def clear_cooldown(body: CooldownBody):
         del st["cooldowns"][body.provider]
         write_state(st)
     return {"ok": True, "provider": body.provider}
+
+
+# ── Brain routing: set the primary model, restart the gateway ──────────────
+
+# Base URLs some providers need written into config.
+_PROVIDER_BASE_URL = {
+    "openai-codex": "https://chatgpt.com/backend-api/codex",
+    "custom": "http://localhost:11434/v1",
+}
+
+
+def _provider_default_model(pid: str) -> str:
+    for p in PROVIDERS_CATALOG:
+        if p["id"] == pid:
+            return p.get("model") or ""
+    return ""
+
+
+def _gateway_status() -> Dict[str, Any]:
+    try:
+        out = subprocess.run(["pgrep", "-f", "gateway run"], capture_output=True, text=True, timeout=5)
+        pids = [x for x in out.stdout.split() if x]
+        started = None
+        if pids:
+            ps = subprocess.run(["ps", "-o", "lstart=", "-p", pids[0]], capture_output=True, text=True, timeout=5)
+            started = ps.stdout.strip() or None
+        return {"running": bool(pids), "pid": pids[0] if pids else None, "started": started}
+    except Exception:
+        return {"running": None, "pid": None, "started": None}
+
+
+def _repin_enabled_crons(provider: str, model: str) -> int:
+    """Re-pin every ENABLED cron to the new primary so Hermes' drift-guard
+    doesn't skip them after a brain switch. Returns the number re-pinned."""
+    try:
+        p = hermes_home() / "cron" / "jobs.json"
+        if not p.exists():
+            return 0
+        d = json.loads(p.read_text(encoding="utf-8"))
+        jobs = d.get("jobs") if isinstance(d, dict) else d
+        n = 0
+        for j in (jobs or []):
+            if isinstance(j, dict) and j.get("enabled"):
+                j["provider"] = provider
+                j["model"] = model
+                j["provider_snapshot"] = provider
+                j["model_snapshot"] = model
+                n += 1
+        if n and isinstance(d, dict):
+            d["updated_at"] = time.time()
+            p.write_text(json.dumps(d, indent=2), encoding="utf-8")
+        return n
+    except Exception:
+        return 0
+
+
+class BrainPrimaryBody(BaseModel):
+    provider: str
+    model: Optional[str] = None
+
+
+@router.get("/brain")
+async def get_brain():
+    cfg = _read_config()
+    m = cfg.get("model") or {}
+    return {
+        "primary": {"provider": m.get("provider"), "model": m.get("default") or m.get("model")},
+        "fallback": cfg.get("fallback_providers") or [],
+        "gateway": _gateway_status(),
+    }
+
+
+@router.post("/brain/primary")
+async def set_primary(body: BrainPrimaryBody):
+    """Promote a provider to primary (demote current to front of fallbacks) and
+    re-pin enabled crons. The gateway must restart to pick it up."""
+    cfg = _read_config()
+    m = cfg.get("model") or {}
+    cur_p, cur_m, cur_url = m.get("provider"), (m.get("default") or m.get("model")), m.get("base_url")
+    new_p = body.provider.strip()
+    if not new_p:
+        raise HTTPException(400, "provider required")
+    new_m = (body.model or "").strip() or _provider_default_model(new_p) or cur_m
+    newm = {"provider": new_p, "default": new_m}
+    if _PROVIDER_BASE_URL.get(new_p):
+        newm["base_url"] = _PROVIDER_BASE_URL[new_p]
+    fps = [f for f in (cfg.get("fallback_providers") or [])
+           if f.get("provider") not in (new_p, cur_p)]
+    if cur_p and cur_p != new_p:
+        old = {"provider": cur_p, "model": cur_m}
+        if cur_url or cur_p in _PROVIDER_BASE_URL:
+            old["base_url"] = cur_url or _PROVIDER_BASE_URL[cur_p]
+        fps.insert(0, old)
+    cfg["model"] = newm
+    cfg["fallback_providers"] = fps
+    _write_config(cfg)
+    repinned = _repin_enabled_crons(new_p, new_m)
+    return {"ok": True, "primary": newm, "crons_repinned": repinned,
+            "gateway_restart_required": True}
+
+
+@router.post("/gateway/restart")
+async def gateway_restart():
+    """Restart the Hermes gateway so a brain switch takes effect (its config is
+    loaded at start). launchd KeepAlive brings it back."""
+    uid = os.getuid()
+    try:
+        r = subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/ai.hermes.gateway"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return {"ok": True, "method": "launchctl", "gateway": _gateway_status()}
+    except Exception:
+        pass
+    try:
+        subprocess.run(["pkill", "-f", "gateway run"], capture_output=True, text=True, timeout=10)
+        return {"ok": True, "method": "pkill (launchd will relaunch)", "gateway": _gateway_status()}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"could not restart gateway: {exc}")
