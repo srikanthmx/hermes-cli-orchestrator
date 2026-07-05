@@ -275,14 +275,9 @@ DEFAULT_CATALOG: List[Dict[str, Any]] = [
         "docs": "https://ollama.com",
         "verified": True,  # confirmed working as free local fallback brain
     },
-    # ── Agent host ────────────────────────────────────────────────────────────
-    {
-        "id": "hermes", "name": "Hermes Agent", "category": "Agent",
-        "bin": "hermes", "version_args": ["--version"], "auth": None,
-        "install": {}, "provider": None, "plan": "—",
-        "docs": "https://hermes-agent.nousresearch.com/docs",
-    },
 ]
+# NOTE: `hermes` (the host agent) is NOT catalogued — it's not a governed worker.
+# `ollama` stays but is a brain, surfaced primarily as the `custom` provider.
 
 
 # Delegation-capable worker CLIs, in fallback priority order (mirrors
