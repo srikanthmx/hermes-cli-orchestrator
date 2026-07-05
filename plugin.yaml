@@ -12,3 +12,5 @@ provides_hooks:
   - post_tool_call
   - pre_llm_call
   - post_llm_call
+  - api_request_error   # auto-heal: promote a healthy brain when primary is exhausted
+  - on_session_start    # restore the preferred primary once its cooldown clears

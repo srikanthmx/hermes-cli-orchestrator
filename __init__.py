@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import time
@@ -748,12 +749,227 @@ def _generate_music(args: dict, **kwargs) -> str:
         return json.dumps({"error": f"music generation failed: {exc}"})
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Auto-heal the brain. When the primary model provider is exhausted (hard 429
+# / quota), Hermes does NOT fail over on its own (verified: it treats a hard
+# quota as fatal). So on `api_request_error` the plugin records the cooldown
+# and PROMOTES a healthy authed provider to primary, then restores the
+# preferred primary once its cooldown clears. The user never edits config.
+# ─────────────────────────────────────────────────────────────────────────
+
+_RETRY_AFTER_RE = re.compile(r"retry after\s+(\d+)", re.I)
+_EXHAUST_PAT = ("quota exhausted", "exhausted", "too many requests",
+                "rate limit", "rate-limit", "insufficient", "429", "quota")
+
+
+def _env_has(key: str) -> bool:
+    if not key:
+        return False
+    if os.environ.get(key):
+        return True
+    try:
+        for line in (_hermes_home() / ".env").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith(key + "=") and line.split("=", 1)[1].strip():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _oauth_authed(name: str) -> bool:
+    # Best-effort: the provider id appears in the pooled-credential auth store.
+    try:
+        return name in (_hermes_home() / "auth.json").read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+
+# Providers eligible to be promoted to primary, best-first. Each entry:
+# (provider, model, base_url_or_None, auth_check). Only ones usable without
+# further setup are promoted.
+_PROMOTE_CANDIDATES = [
+    ("copilot", "gpt-5.4", None,
+     lambda: _oauth_authed("copilot") or _env_has("GITHUB_TOKEN")),
+    ("openai-codex", "gpt-5.5", "https://chatgpt.com/backend-api/codex",
+     lambda: _oauth_authed("codex") or _oauth_authed("openai-codex")),
+    ("gemini", "gemini-3.5-flash", None, lambda: _env_has("GEMINI_API_KEY")),
+    ("openrouter", "deepseek/deepseek-chat-v3.1:free", None,
+     lambda: _env_has("OPENROUTER_API_KEY")),
+    ("nous", "hermes-3-70b", None,
+     lambda: _oauth_authed("nous") or _env_has("NOUS_API_KEY")),
+    ("custom", "qwen3.5:latest", "http://localhost:11434/v1",
+     lambda: shutil.which("ollama") is not None),
+]
+
+
+def _read_config() -> dict:
+    try:
+        import yaml
+        return yaml.safe_load((_hermes_home() / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _write_config(cfg: dict) -> bool:
+    try:
+        import yaml
+        p = _hermes_home() / "config.yaml"
+        tmp = p.with_suffix(".yaml.tmp")
+        tmp.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cli-orchestrator: could not write config: %s", exc)
+        return False
+
+
+def _record_cooldown(provider: str, seconds: int, reason: str) -> None:
+    st = _read_state()
+    st.setdefault("cooldowns", {})[provider] = {
+        "until": time.time() + max(0, seconds), "reason": (reason or "")[:200],
+    }
+    _write_state(st)
+
+
+def _cooling(provider: str) -> bool:
+    cd = _read_state().get("cooldowns", {}).get(provider)
+    return bool(cd and cd.get("until", 0) > time.time())
+
+
+def _primary_entry(provider, model, base_url):
+    # The primary `model:` block uses `default:` for the model name.
+    e = {"provider": provider, "default": model}
+    if base_url:
+        e["base_url"] = base_url
+    return e
+
+
+def _fallback_entry(provider, model, base_url):
+    # `fallback_providers` entries use `model:` for the model name.
+    e = {"provider": provider, "model": model}
+    if base_url:
+        e["base_url"] = base_url
+    return e
+
+
+def _promote_primary(dead_provider: str):
+    """Promote the best healthy provider to primary, demoting the dead one to a
+    fallback so it returns after cooldown. Returns the new primary id or None."""
+    cfg = _read_config()
+    model = cfg.get("model") or {}
+    cur = model.get("provider")
+    if not cur or dead_provider != cur:
+        return None  # the exhausted provider isn't the primary — nothing to do
+    for pid, pmodel, burl, ok in _PROMOTE_CANDIDATES:
+        if pid == cur or _cooling(pid):
+            continue
+        try:
+            if not ok():
+                continue
+        except Exception:
+            continue
+        # Remember the preferred primary (first demotion only) for later restore.
+        st = _read_state()
+        st.setdefault("auto_heal", {}).setdefault("preferred_primary", {
+            "provider": cur,
+            "model": model.get("default") or model.get("model"),
+            "base_url": model.get("base_url"),
+        })
+        _write_state(st)
+        # Demote the dead primary to the front of the fallback chain (dedup).
+        fps = [f for f in (cfg.get("fallback_providers") or [])
+               if f.get("provider") not in (cur, pid)]
+        fps.insert(0, _fallback_entry(cur, model.get("default") or model.get("model"),
+                                      model.get("base_url")))
+        cfg["model"] = _primary_entry(pid, pmodel, burl)
+        cfg["fallback_providers"] = fps
+        if _write_config(cfg):
+            logger.warning("cli-orchestrator auto-heal: %s exhausted -> promoted %s to primary", cur, pid)
+            return pid
+        return None
+    logger.warning("cli-orchestrator auto-heal: %s exhausted but no healthy provider to promote", cur)
+    return None
+
+
+def _maybe_restore_primary() -> None:
+    """If the preferred primary's cooldown cleared and it's authed again,
+    restore it as primary and demote the temporary one."""
+    st = _read_state()
+    pref = (st.get("auto_heal") or {}).get("preferred_primary")
+    if not pref:
+        return
+    prov = pref.get("provider")
+    if not prov or _cooling(prov):
+        return
+    ok = next((c[3] for c in _PROMOTE_CANDIDATES if c[0] == prov), None)
+    try:
+        if ok and not ok():
+            return
+    except Exception:
+        return
+    cfg = _read_config()
+    curm = cfg.get("model") or {}
+    if curm.get("provider") == prov:
+        st["auto_heal"].pop("preferred_primary", None)
+        _write_state(st)
+        return
+    fps = [f for f in (cfg.get("fallback_providers") or []) if f.get("provider") != prov]
+    fps.insert(0, _fallback_entry(curm.get("provider"), curm.get("default") or curm.get("model"),
+                                  curm.get("base_url")))
+    cfg["model"] = _primary_entry(prov, pref.get("model"), pref.get("base_url"))
+    cfg["fallback_providers"] = fps
+    if _write_config(cfg):
+        st["auto_heal"].pop("preferred_primary", None)
+        _write_state(st)
+        logger.warning("cli-orchestrator auto-heal: restored %s as primary (cooldown cleared)", prov)
+
+
+def _on_api_request_error(**kwargs):
+    """Fires when an LLM API request errors. On a quota/rate-limit for the
+    primary provider, record the cooldown and promote a healthy brain."""
+    try:
+        provider = kwargs.get("provider") or ""
+        status = kwargs.get("status_code")
+        reason = str(kwargs.get("reason") or "")
+        blob = (reason + " " + str(kwargs.get("error") or "")).lower()
+        exhausted = status in (429, 529) or any(p in blob for p in _EXHAUST_PAT)
+        if not provider or not exhausted:
+            return
+        m = _RETRY_AFTER_RE.search(blob)
+        seconds = int(m.group(1)) if m else 3600
+        _record_cooldown(provider, seconds, reason)
+        _promote_primary(provider)
+    except Exception as exc:  # noqa: BLE001 — never break the agent
+        logger.debug("cli-orchestrator auto-heal skipped: %s", exc)
+
+
+def _on_session_start(**kwargs):
+    """At session start: (1) if the current primary is a known-cooling provider,
+    promote off it proactively; (2) restore the preferred primary once it's back.
+    This makes a recorded cooldown take effect even for errors no hook can catch
+    (e.g. Codex's auth-layer quota) — the cooldown just has to be recorded."""
+    try:
+        prim = (_read_config().get("model") or {}).get("provider")
+        if prim and _cooling(prim):
+            _promote_primary(prim)
+        _maybe_restore_primary()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("cli-orchestrator session-heal skipped: %s", exc)
+
+
 def register(ctx):
     """Wire the runtime hook + slash command. Called once at startup; if it
     raises, Hermes disables this plugin but keeps running."""
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
+    # Auto-heal the brain when the primary provider is exhausted.
+    try:
+        ctx.register_hook("api_request_error", _on_api_request_error)
+        ctx.register_hook("on_session_start", _on_session_start)
+    except Exception as exc:  # older Hermes may lack these hooks
+        logger.debug("cli-orchestrator: auto-heal hooks not registered: %s", exc)
     # `/cli <subcommand>` dispatcher (Telegram-friendly) + the cli-* family.
     try:
         ctx.register_command(

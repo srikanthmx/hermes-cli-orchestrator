@@ -135,12 +135,33 @@ Debugged end-to-end. Facts, in order:
 **Design consequence for roadmap #1 (auto-cooldown): it must PROMOTE a working
 provider to primary (swap `model.provider`/`model.default`), NOT just reorder the
 fallback chain** — because Hermes-native fallback won't rotate off a hard-quota
-primary. Detect the exhaustion → record the cooldown → set a healthy provider as
-primary → restore the original when its cooldown clears. That is the actual
-mechanism that delivers "never hits a wall."
+primary.
+
+### Auto-heal — what's BUILT and what's the remaining gap (be precise)
+Built in `__init__.py` and verified:
+- **Engine**: `_promote_primary()` (swap in the best healthy authed provider,
+  demote the dead one to fallback, remember the preferred primary) and
+  `_maybe_restore_primary()` (restore when the cooldown clears). Primary block
+  uses `default:`; fallback entries use `model:`. Ranked candidates in
+  `_PROMOTE_CANDIDATES` (copilot → codex → gemini → openrouter → nous → ollama).
+- **Proactive trigger** (`on_session_start`): if the current primary is a
+  **recorded-cooling** provider, promote off it before the session uses it.
+  Verified: codex-primary + recorded cooldown → session start promotes copilot.
+- **Reactive trigger** (`api_request_error` hook): catches **API-layer** 429/quota
+  errors (e.g. a free API provider 429ing mid-request) → records cooldown + promotes.
+
+**THE REMAINING GAP (not built): auto-*recording* Codex's cooldown.** Codex's
+"quota exhausted (429); retry after N" is raised in **`hermes_cli/auth.py` — the
+AUTH layer, before any API request** — so **no plugin hook (incl. api_request_error)
+fires for it** (verified: a real `hermes -z` with codex primary did NOT trigger the
+hook). So the reactive path can't see Codex die. Fix = a background **health-probe**
+(a cron the plugin installs, or a log-watcher of the gateway error log) that probes
+the primary, catches the auth-layer quota in its own try/except, and **records the
+cooldown** — after which the proactive `on_session_start` guard heals automatically.
+Until that probe exists, Codex's cooldown must be recorded by other means.
 
 Current config (dev machine): primary = **copilot/gpt-5.4**; fallbacks =
-openai-codex (returns after cooldown), custom/ollama. Chat verified working.
+openai-codex (cooldown recorded, ~24.7d), custom/ollama. Chat verified working.
 
 ## 6. Current live state (dev machine, keep updated)
 
