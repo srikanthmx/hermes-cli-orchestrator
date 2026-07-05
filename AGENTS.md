@@ -118,15 +118,29 @@ wrote a correct function), **image** (Pollinations JPEG), **TTS** (edge_tts MP3)
 **STT** (faster_whisper transcribed it back). NOT verified: video/music (need
 keys), and see the chat finding below.
 
-## 5c. KNOWN BROKEN (2026-07): chat has no working fallback
+## 5c. Chat resilience — the key finding (2026-07)
 
-`hermes -z "..."` failed with **"Codex provider quota exhausted (429); retry after
-~2.1M s (~25 days)"** and **did not fall back** to anything. Forcing Ollama via
-`--provider custom -m ...` gave "No LLM provider configured." So **chat is
-currently dead**: the primary (Codex) is capped for ~25 days and Hermes-native
-`fallback` did NOT rotate off it. This is the loudest evidence for roadmap #1
-(auto-cooldown skip + making rotation actually fire on a hard 429). Do not claim
-"never hits a wall" until this works.
+Debugged end-to-end. Facts, in order:
+1. `hermes -z "..."` died: **"Codex provider quota exhausted (429); retry after
+   ~2.1M s (~25 days)"** and did NOT fail over.
+2. The `fallback_providers` chain **is** correct/registered (Codex → Copilot →
+   Ollama, per `hermes fallback list`). `fallback_providers` is the right key.
+3. **Copilot works** as a brain when forced (`--provider copilot -m gpt-5.4` → replies).
+4. But adding Copilot as a *fallback* did NOT resurrect chat — **Hermes does not
+   fail over on Codex's hard "quota exhausted, retry in N days" 429 in oneshot
+   mode.** It treats a hard quota as fatal, unlike a transient 429.
+5. **Fix that worked: promote Copilot to PRIMARY** (`model.provider: copilot`).
+   `hermes -z` → "Paris". Chat is working again.
+
+**Design consequence for roadmap #1 (auto-cooldown): it must PROMOTE a working
+provider to primary (swap `model.provider`/`model.default`), NOT just reorder the
+fallback chain** — because Hermes-native fallback won't rotate off a hard-quota
+primary. Detect the exhaustion → record the cooldown → set a healthy provider as
+primary → restore the original when its cooldown clears. That is the actual
+mechanism that delivers "never hits a wall."
+
+Current config (dev machine): primary = **copilot/gpt-5.4**; fallbacks =
+openai-codex (returns after cooldown), custom/ollama. Chat verified working.
 
 ## 6. Current live state (dev machine, keep updated)
 
