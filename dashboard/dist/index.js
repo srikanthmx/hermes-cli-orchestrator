@@ -595,6 +595,7 @@
   // A backend is "fleet-ready" (promoted, routable) once it's installed +
   // verified (CLI), authed (model), or configured (media).
   function fleetReady(row) {
+    if (row.isDeprecated) return false; // legacy/dead (e.g. Gemini CLI tier) — never routable
     if (row.type === "cli") return row.installed && (row.provenance === "verified" || row.auth === "authenticated");
     if (row.type === "provider") return !!row.authed;
     if (row.type === "media") return !!row.configured;
