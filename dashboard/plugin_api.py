@@ -1876,13 +1876,21 @@ def _parse_auth_list(text: str) -> Dict[str, List[Dict[str, Any]]]:
             continue
         mc = cred.match(line)
         if mc and cur is not None:
-            raw = mc.group(2).strip()
+            raw = mc.group(2).replace("←", "").strip()
             low = raw.lower()
             tl = re.search(r"\(([^)]*left)\)", raw)
+            # Split "<label>  <type> <mechanism> <status…>" — label may have spaces.
+            label, ctype = raw, ""
+            mt = re.search(r"\s(api[_-]?key|oauth)\s", " " + raw + " ", re.I)
+            if mt:
+                label = raw[: mt.start()].strip() or raw
+                ctype = mt.group(1).lower().replace("-", "_")
             pool[cur].append({
                 "index": int(mc.group(1)),
-                "raw": raw.replace("←", "").strip(),
-                "active": "←" in raw,
+                "raw": raw,
+                "label": label,
+                "ctype": ctype,
+                "active": "←" in mc.group(2),
                 "exhausted": any(w in low for w in _EXHAUST_WORDS),
                 "detail": tl.group(1) if tl else "",
             })

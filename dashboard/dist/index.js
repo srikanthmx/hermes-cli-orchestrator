@@ -58,10 +58,46 @@
     }, text);
   }
 
+  // Pill with a hover tooltip (e.g. "resets in 24d 2h").
+  function pillT(text, tone, title) {
+    var tones = {
+      ok: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+      warn: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+      bad: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+      info: "border-sky-500/40 bg-sky-500/10 text-sky-300",
+      neutral: "border-border bg-background/40 text-muted-foreground",
+    };
+    return h("span", {
+      title: title || "",
+      className: cn("inline-flex cursor-help items-center whitespace-nowrap border px-2 py-0.5 text-[11px] font-courier uppercase", tones[tone] || tones.neutral),
+    }, text);
+  }
+
+  // A cooldown badge that shows "cooldown Nd" with the full reset on hover.
+  function cooldownBadge(detail) {
+    return pillT("cooldown" + (detail ? " " + detail : ""), "warn", detail ? "Resets in " + detail : "Rate-limited");
+  }
+
   function metric(value, label, tone) {
     return h("div", { className: "min-w-0" },
       h("div", { className: cn("truncate font-courier text-xl leading-tight", tone || "") }, value),
       h("div", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, label));
+  }
+
+  // A labelled usage progress bar: used/cap with a color by fill level. When
+  // there's no cap it shows a neutral track + the raw count.
+  function usageBar(used, cap, label) {
+    used = used || 0;
+    cap = parseInt(cap, 10) || 0;
+    var pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+    var fill = !cap ? "bg-border" : pct >= 100 ? "bg-rose-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+    var tip = label + ": " + used + (cap ? " / " + cap + " (" + pct + "%)" : " (no cap set)");
+    return h("div", { className: "flex items-center gap-1.5", title: tip },
+      h("span", { className: "w-6 text-[9px] uppercase tracking-wider text-muted-foreground" }, label),
+      h("div", { className: "relative h-1.5 w-20 overflow-hidden rounded-sm border border-border bg-background/40" },
+        h("div", { className: cn("absolute inset-y-0 left-0 rounded-sm", fill), style: { width: (cap ? pct : 0) + "%" } })),
+      h("span", { className: "w-14 shrink-0 font-courier text-[10px] text-muted-foreground" },
+        used + (cap ? "/" + cap : "")));
   }
 
   function inputClass(extra) {
@@ -88,7 +124,7 @@
       return pill("ready", "ok");
     }
     if (row.type === "provider") {
-      if (row.cooling_down) return pill("cooldown", "warn");
+      if (row.cooling_down) return cooldownBadge(fmtCooldown(row.cooldown_remaining_s));
       return row.authed ? pill("ready", "ok") : pill(row.auth === "oauth" ? "login" : "no key", "neutral");
     }
     return row.configured ? pill("ready", "ok") : pill(row.needs_key ? "no key" : "not installed", "neutral");
@@ -699,10 +735,10 @@
                   Array.isArray(row.env) ? row.env.join(", ") : row.env))
             : h("span", { className: "text-xs text-muted-foreground" }, "Keyless / local")),
         h("td", { className: "py-3 pr-3" },
-          h("div", { className: "flex flex-col gap-0.5 font-courier text-[11px] text-muted-foreground" },
-            h("span", null, "hour " + (usage.hour || 0) + " / " + capValue(row, "hourly")),
-            h("span", null, "day " + (usage.day || 0) + " / " + capValue(row, "daily")),
-            h("span", null, "month " + (usage.month || 0) + " / " + capValue(row, "monthly")))),
+          h("div", { className: "flex flex-col gap-1" },
+            usageBar(usage.hour, capValue(row, "hourly"), "hr"),
+            usageBar(usage.day, capValue(row, "daily"), "day"),
+            usageBar(usage.month, capValue(row, "monthly"), "mo"))),
         h("td", { className: "py-3 pr-3" },
           h("div", { className: "flex flex-col gap-1" },
             h("div", { className: "flex items-center gap-1" },
@@ -955,7 +991,7 @@
                     p.model ? h("span", { className: "text-[11px] text-muted-foreground" }, p.model) : null)),
                 h("td", { className: "py-3 pr-3 text-xs text-muted-foreground" }, p.tier),
                 h("td", { className: "py-3 pr-3" },
-                  cooling ? pill("cooldown " + fmtCooldown(p.cooldown_remaining_s), "warn")
+                  cooling ? cooldownBadge(fmtCooldown(p.cooldown_remaining_s))
                     : p.authed ? pill("authed", "ok")
                       : pill(p.auth === "oauth" ? "login needed" : "no key", "neutral")),
                 h("td", { className: "py-3 pr-3 text-[11px] text-muted-foreground" }, p.position || "—"),
@@ -1028,11 +1064,12 @@
       accounts.length ? h("div", { className: "flex flex-col gap-1" }, accounts.map(function (a) {
         return h("div", { key: a.index, className: "flex flex-wrap items-center gap-2 text-[11px]" },
           h("span", { className: "font-courier text-muted-foreground" }, "#" + a.index),
-          a.active ? pill("active", "ok") : null,
-          a.exhausted ? pill("cooldown" + (a.detail ? " " + a.detail : ""), "warn") : null,
-          h("span", { className: "min-w-0 truncate font-courier text-muted-foreground" }, a.raw),
+          h("span", { className: "min-w-0 truncate font-courier text-foreground", title: a.raw }, a.label || a.raw),
+          a.ctype ? pill(a.ctype, "info") : null,
+          a.active ? pillT("active", "ok", "Currently in use") : null,
+          a.exhausted ? cooldownBadge(a.detail) : null,
           h("button", { onClick: function () { remove(a.index); }, disabled: busy === "rm" + a.index,
-            className: "border border-border px-1.5 py-0.5 font-courier text-muted-foreground hover:bg-foreground/10 disabled:opacity-40" }, "remove"));
+            className: "ml-auto border border-border px-1.5 py-0.5 font-courier text-muted-foreground hover:bg-foreground/10 disabled:opacity-40" }, "remove"));
       })) : h("span", { className: "text-[11px] text-muted-foreground" }, "No pooled accounts."),
       h("div", { className: "flex flex-wrap items-center gap-2" },
         canKey ? h("button", { onClick: function () { setShowKey(!showKey); },
