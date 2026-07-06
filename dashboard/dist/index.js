@@ -84,20 +84,21 @@
       h("div", { className: "text-[11px] uppercase tracking-wider text-muted-foreground" }, label));
   }
 
-  // A labelled usage progress bar: used/cap with a color by fill level. When
-  // there's no cap it shows a neutral track + the raw count.
+  // A labelled usage progress bar: used/cap with a color by fill level. The
+  // track is always clearly visible; with no cap it shows a faint used-marker
+  // so the bar shape is still obvious.
   function usageBar(used, cap, label) {
     used = used || 0;
     cap = parseInt(cap, 10) || 0;
-    var pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
-    var fill = !cap ? "bg-border" : pct >= 100 ? "bg-rose-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
-    var tip = label + ": " + used + (cap ? " / " + cap + " (" + pct + "%)" : " (no cap set)");
+    var pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : (used > 0 ? 8 : 0);
+    var fill = !cap ? "bg-muted-foreground/40" : pct >= 100 ? "bg-rose-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+    var tip = label + ": " + used + (cap ? " / " + cap + " (" + Math.round((used / cap) * 100) + "%)" : " used (no cap set)");
     return h("div", { className: "flex items-center gap-1.5", title: tip },
       h("span", { className: "w-6 text-[9px] uppercase tracking-wider text-muted-foreground" }, label),
-      h("div", { className: "relative h-1.5 w-20 overflow-hidden rounded-sm border border-border bg-background/40" },
-        h("div", { className: cn("absolute inset-y-0 left-0 rounded-sm", fill), style: { width: (cap ? pct : 0) + "%" } })),
-      h("span", { className: "w-14 shrink-0 font-courier text-[10px] text-muted-foreground" },
-        used + (cap ? "/" + cap : "")));
+      h("div", { className: "relative h-2.5 w-24 overflow-hidden rounded-sm border border-border/70 bg-foreground/10" },
+        h("div", { className: cn("absolute inset-y-0 left-0 rounded-sm", fill), style: { width: pct + "%" } })),
+      h("span", { className: "w-16 shrink-0 font-courier text-[10px] text-muted-foreground" },
+        used + (cap ? " / " + cap : "")));
   }
 
   function inputClass(extra) {
@@ -648,6 +649,7 @@
     var capSt = useState({}); var caps = capSt[0], setCaps = capSt[1];
     var msgSt = useState(""); var msg = msgSt[0], setMsg = msgSt[1];
     var filterSt = useState("all"); var filter = filterSt[0], setFilter = filterSt[1];
+    var qSt = useState(""); var q = qSt[0], setQ = qSt[1];
 
     function capValue(row, field) {
       var key = targetId(row) + ":" + field;
@@ -670,7 +672,13 @@
     }
 
     var kinds = [["all", "All"], ["cli", "CLIs"], ["provider", "Models"], ["media", "Media"]];
-    var rows = targets.filter(function (t) { return filter === "all" || t.type === filter; });
+    var ql = q.trim().toLowerCase();
+    var rows = targets.filter(function (t) {
+      if (filter !== "all" && t.type !== filter) return false;
+      if (!ql) return true;
+      var hay = (targetName(t) + " " + t.id + " " + (t.bin || "") + " " + (t.model || "") + " " + (t.category || "")).toLowerCase();
+      return hay.indexOf(ql) >= 0;
+    });
 
     // Promotion stages. A backend rises into the FLEET only once it's installed
     // AND verified (passed the live test) / authed / configured — otherwise it
@@ -759,7 +767,9 @@
           isCli
             ? h(CliConfigure, { row: row, onChanged: props.onChanged })
             : isProvider
-              ? h(KeyInput, { item: row, endpoint: "/providers/key", onChanged: props.onChanged })
+              // Model rows get full multi-account management (add key / add
+              // login / reset / remove), not just a single key field.
+              ? h(ProviderAccounts, { provider: row, accounts: (props.pool || {})[row.id] || [], onChanged: props.onChanged })
               : isMedia
                 ? h(KeyInput, { item: row, endpoint: "/media/key", onChanged: props.onChanged })
                 : h("span", { className: "text-xs text-muted-foreground" }, "Configured")));
@@ -773,6 +783,13 @@
             h("div", { className: "text-[11px] text-muted-foreground" }, "Install & verify below — a backend promotes into the Fleet once it passes the test. Routing (next tab) uses the Fleet.")),
           h("div", { className: "flex flex-wrap items-center gap-2" },
             msg ? h("span", { className: "text-xs text-muted-foreground" }, msg) : null,
+            h("input", {
+              value: q, placeholder: "search…",
+              onChange: function (e) { setQ(e.target.value); },
+              className: inputClass("w-36 font-courier"),
+            }),
+            q ? h("button", { onClick: function () { setQ(""); },
+              className: "border border-border px-2 py-1 text-[11px] font-courier text-muted-foreground hover:bg-foreground/10" }, "clear") : null,
             h("div", { className: "flex gap-1" }, kinds.map(function (k) {
               return h("button", {
                 key: k[0], onClick: function () { setFilter(k[0]); },
@@ -979,6 +996,7 @@
                 h("th", { className: "py-2 pr-3" }, "Brain"),
                 h("th", { className: "py-2 pr-3" }, "Tier"),
                 h("th", { className: "py-2 pr-3" }, "Status"),
+                h("th", { className: "py-2 pr-3" }, "Usage"),
                 h("th", { className: "py-2 pr-3" }, "Chain"),
                 h("th", { className: "py-2" }, "Action"))),
             h("tbody", null, providers.map(function (p) {
@@ -994,6 +1012,10 @@
                   cooling ? cooldownBadge(fmtCooldown(p.cooldown_remaining_s))
                     : p.authed ? pill("authed", "ok")
                       : pill(p.auth === "oauth" ? "login needed" : "no key", "neutral")),
+                h("td", { className: "py-3 pr-3" },
+                  h("div", { className: "flex flex-col gap-1" },
+                    usageBar((p.usage || {}).day, (p.limits || {}).daily, "day"),
+                    usageBar((p.usage || {}).month, (p.limits || {}).monthly, "mo"))),
                 h("td", { className: "py-3 pr-3 text-[11px] text-muted-foreground" }, p.position || "—"),
                 h("td", { className: "py-3" },
                   isPrimary ? pill("primary", "ok")
@@ -1209,7 +1231,7 @@
 
       view === "backends"
         // 1) Single, unified config for every backend.
-        ? h(BackendsConfig, { targets: targets, onChanged: load })
+        ? h(BackendsConfig, { targets: targets, pool: pool, onChanged: load })
       : view === "brains"
         // 1b) Brain routing: primary model + gateway restart + credential pool.
         ? h("div", { className: "flex flex-col gap-5" },
