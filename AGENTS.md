@@ -60,11 +60,12 @@ One-liner: **"The CLI & backend control plane for Hermes — extends Hermes's mo
 - **Codex limit is brutal:** ~3 cron iterations exhaust it, then a **~28-day cooldown**. Codex is NOT a workhorse for crons. Never design around Codex as the steady brain.
 - **Ollama is optional**, never assumed. Not everyone installs it.
 - **Gemini CLI free tier is DEAD** ("IneligibleTierError — migrate to Antigravity"). The **Gemini API key** path still works; use that, not the CLI.
+- **`hermes-agent/` is no longer perfectly pristine:** it carries **one local commit** (88d1d620, cherry-picked upstream streaming fix for empty/None choices) on top of upstream f64e4f4f. The "never modify the Hermes tree" rule still stands for plugin work; expect `git pull` to need a rebase of that one commit until upstream ships it.
 - **Antigravity is TWO products:** the **CLI = `agy`** (headless via `agy -p "..."`, a real testable worker) and the **IDE = `antigravity-ide`** (a VS Code-style GUI launcher — "Open app", not headless).
 - **Dashboard plugins render only in the web dashboard**, not the desktop app's native UI. The runtime plugin (hooks/tools/`/cli-*` commands) DOES work in the desktop (same backend). See `memory/desktop-vs-dashboard-plugins.md`.
 - **Backend Python loads once, at process start.** A browser/app refresh loads new JS only. After ANY change to `dashboard/plugin_api.py` or `__init__.py`, the dashboard/gateway **must be RESTARTED** — say "restart the backend," never "reload." JS-only (`dashboard/dist/index.js`) changes just need a browser refresh.
 - **Web dashboard token:** loopback API routes require `X-Hermes-Session-Token`. `hermes dashboard` needs a TTY (its TUI dies when backgrounded here). To run it headless: `uvicorn hermes_cli.web_server:app --port 9119` with `HERMES_DASHBOARD_SESSION_TOKEN=<tok>` set, then open `http://127.0.0.1:9119/?token=<tok>`.
-- Verified worker CLIs on the dev machine: **codex, opencode, agy, gh** (live-tested). qwen CLI is **broken** (Node module error). gemini CLI dead.
+- Verified worker CLIs on the dev machine: **codex, opencode, agy, gh** (live-tested). qwen CLI is **still broken** (on PATH, but `qwen -p` crashes with a Node error under Node v24.13.1 — re-verified 2026-07-08). gemini CLI dead (binary present, free tier gone).
 
 ---
 
@@ -84,8 +85,8 @@ One-liner: **"The CLI & backend control plane for Hermes — extends Hermes's mo
 | File | Role |
 |---|---|
 | `__init__.py` | Runtime plugin: `post_tool_call` usage, `pre_llm_call` routing policy, `post_llm_call`, `cli_delegate` tool (+ `/cli-*` commands), `generate_music`. `DELEGATE_ARGV`/`CODING_PRIORITY` = worker fallback order. |
-| `dashboard/plugin_api.py` | FastAPI backend at `/api/plugins/cli-orchestrator/`. Catalog (CLIs), providers catalog, media catalog, scan/limits/usage/install, `/install/assist` (AI help via a worker CLI, runs off the event loop), `/cli/test` + `/cli/open` (live sign-in check), `/capabilities`, `/verify-mark`, `/use-cases` (per-category routing), cooldown endpoints. |
-| `dashboard/dist/index.js` | Dashboard UI (plain IIFE, no build). Top-level tabs: **Backends** (single unified config: CLIs+models+media, caps, keys, install stepper, per-backend category toggles, live Check sign-in, get-key links) and **Routing** (category-wise primary/fallback). |
+| `dashboard/plugin_api.py` | FastAPI backend at `/api/plugins/cli-orchestrator/`. Catalog (CLIs), providers catalog, media catalog, scan/limits/usage/install, `/install/assist` (AI help via a worker CLI, runs off the event loop), `/cli/test` + `/cli/open` (live sign-in check), `/capabilities`, `/verify-mark`, `/use-cases` (per-category routing), cooldown endpoints, **brain endpoints** (`/brain`, `/brain/primary` — promote provider to primary + re-pin enabled crons via `_repin_enabled_crons`, `/gateway/restart` via launchctl kickstart), **credential pool** (`/auth/pool`, `/auth/add-key`, `/auth/add-oauth`(+status), `/auth/reset`, `/auth/remove` — wraps `hermes auth`). |
+| `dashboard/dist/index.js` | Dashboard UI (plain IIFE, no build). THREE top-level tabs: **Backends** (staged: catalog → install → verify → promote to Fleet; CLIs+models+media, caps, keys, install stepper, per-backend category toggles, live Check sign-in, get-key links, usage bars, search), **Brains** (switch primary model + restart gateway + auto-repin crons; pooled accounts add/reset/remove per brain), **Routing** (category-wise primary/fallback). |
 | `dashboard/manifest.json` | Registers the CLI Governor tab (web dashboard only). |
 | `backends/` | Bundled Hermes provider-plugins (pollinations image, fal video). |
 
@@ -93,12 +94,12 @@ One-liner: **"The CLI & backend control plane for Hermes — extends Hermes's mo
 
 ## 5. Roadmap / open governance work (the actual value)
 
-Priority order — these deliver the North Star:
+Priority order — these deliver the North Star (status audited 2026-07-08):
 
-1. **Auto-cooldown skip (the key gap).** Detect exhaustion signals ("retry in 28d", 429s) from a run, mark that bucket cooling, and drop it from the active chain until it's back — so switches are invisible and the user never waits on one dead bucket. (Cooldowns can be *recorded* today; auto-detection from run errors is NOT wired yet.)
-2. **Free-first governed chain.** Build/rank `fallback_providers` across every addable bucket (free OAuth + free API + trials + subs as bonus), Ollama only if present. Native Hermes fallback + credential pooling does the rotation; the governor manages/ranks it.
-3. **Multi-key / multi-account pooling** per provider (wraps `hermes auth add`) so each bucket is bigger.
-4. **Crons ride the chain, not Codex.** Pin crons to the chain / a stable free provider; pinning also exempts them from the cron drift-guard (#44585) that silently skips unpinned jobs when config drifts.
+1. **Auto-cooldown skip — the Sentinel (STILL THE KEY GAP).** The promote/restore engine + proactive/reactive triggers are BUILT (§5c). Missing: a **log-watcher/health-probe** that auto-*records* auth-layer quota deaths (Codex) which no plugin hook can see, and **probe-gated restore** (verify a bucket with one real call before restoring it as primary, not wall-clock alone).
+2. **Free-first governed chain.** Build/rank `fallback_providers` across every addable bucket (free OAuth + free API + trials + subs as bonus), Ollama only if present. Native Hermes fallback + credential pooling does the rotation; the governor manages/ranks it. Blocked in practice by zero free keys on the machine → needs the **Pool Builder wizard** (guided Qwen OAuth + OpenRouter `:free` + Gemini API key, each live-verified, then auto-rank the chain).
+3. ~~Multi-key / multi-account pooling~~ **BUILT** — Brains tab + `/auth/*` endpoints wrap `hermes auth` (add key / add OAuth / reset / remove per provider). Pool currently holds only codex(1) + copilot(1); value realizes once free buckets are added.
+4. **Crons ride the chain — HALF BUILT.** Manual brain switch (`/brain/primary`) re-pins all ENABLED crons to the new primary (drift-guard #44585 exemption). **GAP: the auto-heal path (`_promote_primary` in `__init__.py`) does NOT re-pin crons and does NOT restart the gateway** — an auto-promotion would strand pinned crons on the dead provider and (for gateway sessions) not take effect until restart. Bring the auto path to parity with the manual path.
 5. `/cli-dashboard` command — one-click bridge from desktop/chat to the web UI.
 
 ---
@@ -160,12 +161,14 @@ the primary, catches the auth-layer quota in its own try/except, and **records t
 cooldown** — after which the proactive `on_session_start` guard heals automatically.
 Until that probe exists, Codex's cooldown must be recorded by other means.
 
-Current config (dev machine): primary = **copilot/gpt-5.4**; fallbacks =
-openai-codex (cooldown recorded, ~24.7d), custom/ollama. Chat verified working.
+Also note: the auto-heal path writes `config.yaml` but does **not** restart the
+gateway (config loads at gateway start) and does **not** re-pin crons — the
+manual Brains-tab switch does both. See roadmap #4.
 
-## 6. Current live state (dev machine, keep updated)
+## 6. Current live state (dev machine, audited 2026-07-08)
 
-- Authed model providers: **Codex, Copilot, Ollama** only. The ~10 free/trial providers need API keys (get-key links are in the UI).
-- Verified worker CLIs: **codex, opencode, agy** (all delegation-capable); **gh** authed. agy is wired into `DELEGATE_ARGV`/`CODING_PRIORITY`.
-- Crons: two jobs in `~/.hermes/cron/jobs.json` are **disabled** (`enabled:False`) and **unpinned** — they don't run and, when they did, burned Codex then died on the 28-day cap.
-- The user has NOT set up any free provider keys yet — realizing the pool requires adding a few (Qwen login + OpenRouter `:free` + Gemini API is the fastest path to effectively-unlimited consistent crons without Ollama).
+- Primary = **copilot/gpt-5.4**; fallbacks = openai-codex (cooldown recorded, **~20.8d left**), custom/ollama (qwen3.5). `auto_heal.preferred_primary` = **openai-codex** — the engine will try to restore Codex as primary when its cooldown clears (probe-gate this! see roadmap #1).
+- Authed model providers: **Codex, Copilot, Ollama** only (`auth.json` credential_pool: openai-codex×1, copilot×1). The ~10 free/trial providers still need API keys (get-key links in the UI).
+- Worker CLIs on PATH: **codex, opencode, agy, gh, copilot, ollama** (verified earlier); **gemini** present but free tier dead; **qwen** present but headless crashes (Node v24.13.1); **claude** not installed.
+- Crons in `~/.hermes/cron/jobs.json`: **"small-cap-stock-research-market-hours" is ENABLED and pinned to copilot/gpt-5.4**; "AI trending news + research briefing" disabled/unpinned. The enabled cron is why auto-heal parity (roadmap #4 gap) matters now.
+- The user has NOT set up any free provider keys yet (`.env` has only Telegram vars) — realizing the pool requires adding a few (Qwen login + OpenRouter `:free` + Gemini API is the fastest path to effectively-unlimited consistent crons without Ollama).
