@@ -179,12 +179,20 @@ All settings are reachable from any Hermes gateway (Telegram, Discord, …) via
 | `/cli-media` | media backend status |
 | `/cli-delegate <task>` | **run a task on a local worker CLI** (caps + fallback + usage) |
 | `/cli-usage` | provider / model (brain) usage |
+| `/cli-brain` | brain status: primary, fallbacks, cooldowns, ranked switchable brains |
+| `/cli-brain <provider> [model]` | **switch the primary brain** — re-pins enabled crons + restarts the gateway |
+| `/cli-brain test <provider>` | live-probe a brain with one real call (records/clears its cooldown) |
+| `/cli-brain restart` | restart the gateway |
 | `/cli-help` | list commands |
 
 `/cli-delegate` is the reliable way to put a **local CLI to work** without depending
 on a weak model to emit a tool call — it routes to the highest-priority available
 CLI, skips any over its cap, falls back on rate-limit, and records the usage the
 dashboard shows.
+
+`/cli-brain` is the **manual brain switch** — by design the plugin never changes your
+primary model on its own; it records cooldowns and warns, and you flip the brain from
+Telegram/chat in one command (no LLM in the loop, so it works while the brain is dead).
 
 `/cli <subcommand>` works too (e.g. `/cli limit codex 200`) — handy because
 Telegram's command **menu** only autocompletes `[a-z0-9_]` names, so the
@@ -303,15 +311,15 @@ the global brain changes, as a spend-safety. Fix: **pin the cron** to a model. T
 tab **auto-repins enabled crons** whenever you switch the primary, so this shouldn't recur.
 
 **Q: Codex is capped for ~a month and nothing rotates — isn't this "never hits a wall"?**
-Honest gap. Two facts: (1) **Hermes does not fail over on a hard-quota 429** (Codex's
-"retry after N days") — it treats it as fatal, so adding fallbacks doesn't help; you must
-**promote a healthy brain to primary** (Brains tab, or the auto-heal engine). (2) The
-**auto-detection of Codex's death is NOT built yet** — Codex's quota error is raised in
-Hermes's auth layer (`auth.py`), *before* any API request, so no plugin hook (including
-`api_request_error`) can catch it. The auto-heal engine *promotes/restores* correctly and
-*proactively* skips a **recorded** cooldown at session start, but recording Codex's
-cooldown automatically needs a background health-probe/log-watcher (**roadmap**). Until
-then, switch the brain in the Brains tab when Codex caps.
+Two facts: (1) **Hermes does not fail over on a hard-quota 429** (Codex's "retry after N
+days") — it treats it as fatal, so adding fallbacks doesn't help; a healthy brain must be
+**promoted to primary**. (2) **Switching is deliberately manual** — the plugin never
+rewrites your primary on its own. When a brain caps, switch it yourself in seconds from
+anywhere: **`/cli-brain <provider>`** (Telegram/chat — it dispatches with no LLM, so it
+works even while the brain is dead) or the **Brains tab**. Both re-pin enabled crons and
+restart the gateway. `/cli-brain` shows status + cooldowns; `/cli-brain test <provider>`
+live-probes a brain with one real call and records/clears its cooldown (this is also how
+Codex's auth-layer quota death — invisible to plugin hooks — gets recorded).
 
 **Q: The CLI catalog lists things I haven't verified — is that padding?**
 No. The **Backends** tab is staged: **Install → Set up (verify / add key) → Fleet**. A
@@ -331,8 +339,8 @@ It uses `launchctl kickstart` on the `ai.hermes.gateway` launchd service (falls 
 however you started it.
 
 ### Not built yet (roadmap — don't expect these to work)
-- **Auto-detect Codex/auth-layer exhaustion** and record its cooldown (needs a health-probe/log-watcher). The promote/restore engine + proactive session-start skip are built.
-- **One-click free-first chain builder** and **multi-key/multi-account pooling** wrappers (rotation itself is Hermes-native `fallback`/`auth`).
+- **Background auto-*recording* of Codex/auth-layer exhaustion** (a log-watcher that records — never switches). Today, `/cli-brain test codex` records it on demand.
+- **One-click free-first chain builder** (guided wizard for Qwen OAuth + OpenRouter `:free` + Gemini API key). Multi-account pooling itself is built (Brains tab).
 
 ---
 

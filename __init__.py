@@ -289,6 +289,16 @@ def _on_pre_llm_call(session_id=None, user_message=None, model=None,
                         "(no delegation).")
             lines.append(f"Capable CLIs available now (priority order): "
                         f"{', '.join(capable)}.")
+        try:
+            prim = (_read_config().get("model") or {}).get("provider")
+            if prim and _cooling(prim):
+                lines.append(
+                    f"[warning] Primary provider '{prim}' has a recorded quota "
+                    "cooldown; replies may fail. Suggest the user switch brains "
+                    "with /cli-brain <provider> (works even when the model is down)."
+                )
+        except Exception:
+            pass
         return {"context": "\n".join(lines)}
     except Exception as exc:  # never break the turn
         logger.debug("cli-orchestrator routing policy skipped: %s", exc)
@@ -532,6 +542,9 @@ def _cmd_help(raw_args: str = "") -> str:
         "  /cli-media                        media backend status\n"
         "  /cli-usage                        provider / model usage (turns)\n"
         "  /cli-delegate <task>              run a task on a local worker CLI\n"
+        "  /cli-brain                        brain status (primary, fallbacks, cooldowns)\n"
+        "  /cli-brain <provider> [model]     SWITCH the primary brain (re-pins crons + restarts gateway)\n"
+        "  /cli-brain test <provider>        live-probe a provider (records/clears cooldown)\n"
         "  /cli-help                         this help\n"
         "(Also works as /cli <subcommand>.)"
     )
@@ -753,11 +766,15 @@ def _generate_music(args: dict, **kwargs) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Auto-heal the brain. When the primary model provider is exhausted (hard 429
-# / quota), Hermes does NOT fail over on its own (verified: it treats a hard
-# quota as fatal). So on `api_request_error` the plugin records the cooldown
-# and PROMOTES a healthy authed provider to primary, then restores the
-# preferred primary once its cooldown clears. The user never edits config.
+# Brain switching — MANUAL by design (user decision 2026-07-08). When a
+# provider is exhausted (hard 429 / quota), Hermes does NOT fail over on its
+# own (verified: it treats a hard quota as fatal). The governor's job is to
+# make the switch *available and instant*, never to make it autonomously:
+#   * hooks RECORD cooldowns so status/suggestions stay accurate,
+#   * `/cli-brain` (Telegram / chat / CLI) shows status, live-probes a
+#     provider with one real one-shot call, and switches primary — re-pinning
+#     enabled crons and restarting the gateway, same as the dashboard Brains
+#     tab. It dispatches directly (no LLM), so it works when the brain is dead.
 # ─────────────────────────────────────────────────────────────────────────
 
 _RETRY_AFTER_RE = re.compile(r"retry after\s+(\d+)", re.I)
@@ -788,10 +805,10 @@ def _oauth_authed(name: str) -> bool:
         return False
 
 
-# Providers eligible to be promoted to primary, best-first. Each entry:
-# (provider, model, base_url_or_None, auth_check). Only ones usable without
-# further setup are promoted.
-_PROMOTE_CANDIDATES = [
+# Providers rankable as primary, best-first. Each entry:
+# (provider, default_model, base_url_or_None, auth_check). Used for the
+# /cli-brain status ranking and to resolve a model when switching.
+_BRAIN_CANDIDATES = [
     ("copilot", "gpt-5.4", None,
      lambda: _oauth_authed("copilot") or _env_has("GITHUB_TOKEN")),
     ("openai-codex", "gpt-5.5", "https://chatgpt.com/backend-api/codex",
@@ -835,9 +852,24 @@ def _record_cooldown(provider: str, seconds: int, reason: str) -> None:
     _write_state(st)
 
 
+def _clear_cooldown(provider: str) -> None:
+    st = _read_state()
+    if (st.get("cooldowns") or {}).pop(provider, None) is not None:
+        _write_state(st)
+
+
 def _cooling(provider: str) -> bool:
     cd = _read_state().get("cooldowns", {}).get(provider)
     return bool(cd and cd.get("until", 0) > time.time())
+
+
+def _fmt_secs(secs: float) -> str:
+    secs = max(0, int(secs))
+    if secs >= 86400:
+        return f"{secs / 86400:.1f}d"
+    if secs >= 3600:
+        return f"{secs / 3600:.1f}h"
+    return f"{secs // 60}m"
 
 
 def _primary_entry(provider, model, base_url):
@@ -856,81 +888,199 @@ def _fallback_entry(provider, model, base_url):
     return e
 
 
-def _promote_primary(dead_provider: str):
-    """Promote the best healthy provider to primary, demoting the dead one to a
-    fallback so it returns after cooldown. Returns the new primary id or None."""
-    cfg = _read_config()
-    model = cfg.get("model") or {}
-    cur = model.get("provider")
-    if not cur or dead_provider != cur:
-        return None  # the exhausted provider isn't the primary — nothing to do
-    for pid, pmodel, burl, ok in _PROMOTE_CANDIDATES:
-        if pid == cur or _cooling(pid):
-            continue
-        try:
-            if not ok():
-                continue
-        except Exception:
-            continue
-        # Remember the preferred primary (first demotion only) for later restore.
-        st = _read_state()
-        st.setdefault("auto_heal", {}).setdefault("preferred_primary", {
-            "provider": cur,
-            "model": model.get("default") or model.get("model"),
-            "base_url": model.get("base_url"),
-        })
-        _write_state(st)
-        # Demote the dead primary to the front of the fallback chain (dedup).
-        fps = [f for f in (cfg.get("fallback_providers") or [])
-               if f.get("provider") not in (cur, pid)]
-        fps.insert(0, _fallback_entry(cur, model.get("default") or model.get("model"),
-                                      model.get("base_url")))
-        cfg["model"] = _primary_entry(pid, pmodel, burl)
-        cfg["fallback_providers"] = fps
-        if _write_config(cfg):
-            logger.warning("cli-orchestrator auto-heal: %s exhausted -> promoted %s to primary", cur, pid)
-            return pid
-        return None
-    logger.warning("cli-orchestrator auto-heal: %s exhausted but no healthy provider to promote", cur)
-    return None
-
-
-def _maybe_restore_primary() -> None:
-    """If the preferred primary's cooldown cleared and it's authed again,
-    restore it as primary and demote the temporary one."""
-    st = _read_state()
-    pref = (st.get("auto_heal") or {}).get("preferred_primary")
-    if not pref:
-        return
-    prov = pref.get("provider")
-    if not prov or _cooling(prov):
-        return
-    ok = next((c[3] for c in _PROMOTE_CANDIDATES if c[0] == prov), None)
+def _known_providers() -> list:
+    """Provider ids the switch/probe commands accept: ranked candidates, the
+    current fallback chain, then the dashboard providers catalog."""
+    ids = [c[0] for c in _BRAIN_CANDIDATES]
+    for f in (_read_config().get("fallback_providers") or []):
+        p = f.get("provider")
+        if p and p not in ids:
+            ids.append(p)
     try:
-        if ok and not ok():
-            return
+        for p in _backend().PROVIDERS_CATALOG:
+            if p["id"] not in ids:
+                ids.append(p["id"])
     except Exception:
-        return
+        pass
+    return ids
+
+
+def _resolve_model(pid: str, explicit: str | None) -> tuple:
+    """(model, base_url) for a provider: explicit arg → existing fallback
+    entry → ranked candidates → dashboard providers catalog."""
+    fb = next((f for f in (_read_config().get("fallback_providers") or [])
+               if f.get("provider") == pid), None)
+    cand = next((c for c in _BRAIN_CANDIDATES if c[0] == pid), None)
+    model = explicit or (fb or {}).get("model") or (cand[1] if cand else None)
+    if not model:
+        try:
+            model = _backend()._provider_default_model(pid) or None
+        except Exception:
+            model = None
+    base_url = (fb or {}).get("base_url") or (cand[2] if cand else None)
+    return model, base_url
+
+
+def _schedule_gateway_restart(delay: int = 5) -> str:
+    """Restart the gateway shortly AFTER the command reply flushes (a brain
+    switch only takes effect on gateway start). launchd KeepAlive relaunches
+    it; the pkill fallback relies on the same."""
+    import subprocess
+    try:
+        out = subprocess.run(["pgrep", "-f", "gateway run"], capture_output=True,
+                             text=True, timeout=5)
+        if not out.stdout.strip():
+            return "gateway not running — new brain loads on next start"
+        uid = os.getuid()
+        subprocess.Popen(
+            ["/bin/sh", "-c",
+             f"sleep {delay}; launchctl kickstart -k gui/{uid}/ai.hermes.gateway "
+             f"2>/dev/null || pkill -f 'gateway run'"],
+            start_new_session=True)
+        return f"gateway restarts in ~{delay}s to load it"
+    except Exception as exc:  # noqa: BLE001
+        return f"could not schedule gateway restart ({exc}) — restart it manually"
+
+
+def _switch_primary(new_p: str, explicit_model: str | None = None) -> str:
+    """THE manual brain switch: promote `new_p` to primary, demote the old
+    primary to the front of the fallback chain, re-pin enabled crons, restart
+    the gateway. Never called autonomously."""
+    known = _known_providers()
+    if new_p not in known:
+        return f"Unknown provider '{new_p}'. Known: {', '.join(known)}"
     cfg = _read_config()
-    curm = cfg.get("model") or {}
-    if curm.get("provider") == prov:
-        st["auto_heal"].pop("preferred_primary", None)
-        _write_state(st)
-        return
-    fps = [f for f in (cfg.get("fallback_providers") or []) if f.get("provider") != prov]
-    fps.insert(0, _fallback_entry(curm.get("provider"), curm.get("default") or curm.get("model"),
-                                  curm.get("base_url")))
-    cfg["model"] = _primary_entry(prov, pref.get("model"), pref.get("base_url"))
+    m = cfg.get("model") or {}
+    cur_p, cur_m = m.get("provider"), (m.get("default") or m.get("model"))
+    if new_p == cur_p:
+        return f"{new_p} is already the primary brain ({cur_m})."
+    new_m, burl = _resolve_model(new_p, explicit_model)
+    if not new_m:
+        return f"No known model for '{new_p}'. Usage: /cli-brain <provider> <model>"
+    fps = [f for f in (cfg.get("fallback_providers") or [])
+           if f.get("provider") not in (new_p, cur_p)]
+    if cur_p:
+        fps.insert(0, _fallback_entry(cur_p, cur_m, m.get("base_url")))
+    cfg["model"] = _primary_entry(new_p, new_m, burl)
     cfg["fallback_providers"] = fps
-    if _write_config(cfg):
-        st["auto_heal"].pop("preferred_primary", None)
-        _write_state(st)
-        logger.warning("cli-orchestrator auto-heal: restored %s as primary (cooldown cleared)", prov)
+    if not _write_config(cfg):
+        return "Could not write config.yaml — switch aborted."
+    st = _read_state()
+    st.pop("auto_heal", None)  # legacy auto-heal marker, no longer used
+    _write_state(st)
+    try:
+        repinned = _backend()._repin_enabled_crons(new_p, new_m)
+    except Exception:
+        repinned = 0
+    note = (f" ⚠ {new_p} has a recorded cooldown — it may still be quota-limited."
+            if _cooling(new_p) else "")
+    logger.warning("cli-orchestrator: brain switched %s -> %s/%s (manual)", cur_p, new_p, new_m)
+    return (f"Brain switched: {cur_p or '?'} → {new_p}/{new_m}. "
+            f"{repinned} cron(s) re-pinned; {_schedule_gateway_restart()}.{note}")
+
+
+_PROBE_PROMPT = "Reply with exactly: OK"
+
+
+def _probe_provider(pid: str, explicit_model: str | None = None) -> str:
+    """Live health check: one real one-shot call through the provider. Records
+    a cooldown on quota/rate-limit, clears it on success. User-triggered only —
+    a probe SPENDS one request on that bucket."""
+    import subprocess
+    known = _known_providers()
+    if pid not in known:
+        return f"Unknown provider '{pid}'. Known: {', '.join(known)}"
+    model, _burl = _resolve_model(pid, explicit_model)
+    hb = shutil.which("hermes") or str(Path.home() / ".local/bin/hermes")
+    argv = [hb, "-z", _PROBE_PROMPT, "--provider", pid] + (["-m", model] if model else [])
+    t0 = time.time()
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return f"{pid}: ✗ probe timed out (180s)"
+    except Exception as exc:  # noqa: BLE001
+        return f"{pid}: ✗ probe could not run ({exc})"
+    blob = ((proc.stdout or "") + " " + (proc.stderr or "")).lower()
+    exhausted = any(p in blob for p in _EXHAUST_PAT)
+    if proc.returncode == 0 and not exhausted:
+        _clear_cooldown(pid)
+        return f"{pid}/{model}: ✓ healthy ({time.time() - t0:.0f}s)"
+    mm = _RETRY_AFTER_RE.search(blob)
+    seconds = int(mm.group(1)) if mm else 3600
+    if exhausted:
+        _record_cooldown(pid, seconds, blob[:200])
+        return f"{pid}/{model}: ✗ quota/rate-limited — cooldown recorded ({_fmt_secs(seconds)})"
+    tail = (proc.stderr or proc.stdout or "").strip()[-200:]
+    return f"{pid}/{model}: ✗ failed (rc={proc.returncode}) {tail}"
+
+
+def _brain_status() -> str:
+    cfg = _read_config()
+    m = cfg.get("model") or {}
+    now = time.time()
+    cds = {p: cd for p, cd in _read_state().get("cooldowns", {}).items()
+           if cd.get("until", 0) > now}
+    lines = [f"Primary brain: {m.get('provider')} / {m.get('default') or m.get('model')}"]
+    fps = cfg.get("fallback_providers") or []
+    if fps:
+        lines.append("Fallbacks: " + " → ".join(
+            f"{f.get('provider')}/{f.get('model')}" for f in fps))
+    lines.append("")
+    lines.append("Switchable brains (ranked):")
+    for pid, pmodel, _burl, ok in _BRAIN_CANDIDATES:
+        try:
+            authed = bool(ok())
+        except Exception:
+            authed = False
+        if pid in cds:
+            state = f"cooling, {_fmt_secs(cds[pid]['until'] - now)} left"
+        elif authed:
+            state = "ready"
+        else:
+            state = "not authed"
+        cur = "  ← primary" if pid == m.get("provider") else ""
+        lines.append(f"  {'●' if state == 'ready' else '○'} {pid} ({pmodel}) — {state}{cur}")
+    lines.append("")
+    lines.append("/cli-brain <provider> [model]  switch (re-pins crons + restarts gateway)")
+    lines.append("/cli-brain test <provider>     live probe (spends 1 request)")
+    lines.append("/cli-brain restart             restart the gateway")
+    return "\n".join(lines)
+
+
+def _cmd_brain(raw_args: str = "") -> str:
+    """/cli-brain — manual brain control (status | <provider> [model] |
+    test <provider> [model] | restart). Dispatches directly (no LLM), so it
+    works from Telegram/chat even when the current brain is dead."""
+    parts = (raw_args or "").split()
+    if not parts:
+        return _brain_status()
+    sub = parts[0].lower()
+    if sub in ("status", "list"):
+        return _brain_status()
+    if sub == "restart":
+        return "Gateway: " + _schedule_gateway_restart()
+    if sub == "test":
+        if len(parts) < 2:
+            return "Usage: /cli-brain test <provider> [model]"
+        return _probe_provider(parts[1], parts[2] if len(parts) > 2 else None)
+    if sub == "switch":
+        parts = parts[1:]
+    if not parts:
+        return "Usage: /cli-brain [switch] <provider> [model]"
+    return _switch_primary(parts[0], parts[1] if len(parts) > 1 else None)
+
+
+# Registered late (module bottom-ish) so the handler exists; register() reads
+# this list at startup, after the whole module has loaded.
+_CLI_COMMANDS.append(("cli-brain", _cmd_brain,
+                      "Brain: status | <provider> [model] | test <provider> | restart"))
+_SUBCMDS["brain"] = _cmd_brain
 
 
 def _on_api_request_error(**kwargs):
-    """Fires when an LLM API request errors. On a quota/rate-limit for the
-    primary provider, record the cooldown and promote a healthy brain."""
+    """Fires when an LLM API request errors. RECORDS a cooldown on quota /
+    rate-limit so /cli-brain status and the pre-turn warning stay accurate.
+    Never switches the brain — switching is manual (/cli-brain) by design."""
     try:
         provider = kwargs.get("provider") or ""
         status = kwargs.get("status_code")
@@ -942,23 +1092,8 @@ def _on_api_request_error(**kwargs):
         m = _RETRY_AFTER_RE.search(blob)
         seconds = int(m.group(1)) if m else 3600
         _record_cooldown(provider, seconds, reason)
-        _promote_primary(provider)
     except Exception as exc:  # noqa: BLE001 — never break the agent
-        logger.debug("cli-orchestrator auto-heal skipped: %s", exc)
-
-
-def _on_session_start(**kwargs):
-    """At session start: (1) if the current primary is a known-cooling provider,
-    promote off it proactively; (2) restore the preferred primary once it's back.
-    This makes a recorded cooldown take effect even for errors no hook can catch
-    (e.g. Codex's auth-layer quota) — the cooldown just has to be recorded."""
-    try:
-        prim = (_read_config().get("model") or {}).get("provider")
-        if prim and _cooling(prim):
-            _promote_primary(prim)
-        _maybe_restore_primary()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("cli-orchestrator session-heal skipped: %s", exc)
+        logger.debug("cli-orchestrator cooldown-record skipped: %s", exc)
 
 
 def register(ctx):
@@ -967,12 +1102,12 @@ def register(ctx):
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
-    # Auto-heal the brain when the primary provider is exhausted.
+    # Record provider cooldowns on quota errors (informational only — brain
+    # switching is manual via /cli-brain, never autonomous).
     try:
         ctx.register_hook("api_request_error", _on_api_request_error)
-        ctx.register_hook("on_session_start", _on_session_start)
-    except Exception as exc:  # older Hermes may lack these hooks
-        logger.debug("cli-orchestrator: auto-heal hooks not registered: %s", exc)
+    except Exception as exc:  # older Hermes may lack this hook
+        logger.debug("cli-orchestrator: cooldown-record hook not registered: %s", exc)
     # `/cli <subcommand>` dispatcher (Telegram-friendly) + the cli-* family.
     try:
         ctx.register_command(

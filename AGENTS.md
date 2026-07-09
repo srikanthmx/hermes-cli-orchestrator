@@ -84,7 +84,7 @@ One-liner: **"The CLI & backend control plane for Hermes — extends Hermes's mo
 
 | File | Role |
 |---|---|
-| `__init__.py` | Runtime plugin: `post_tool_call` usage, `pre_llm_call` routing policy, `post_llm_call`, `cli_delegate` tool (+ `/cli-*` commands), `generate_music`. `DELEGATE_ARGV`/`CODING_PRIORITY` = worker fallback order. |
+| `__init__.py` | Runtime plugin: `post_tool_call` usage, `pre_llm_call` routing policy (+ cooling-primary warning), `post_llm_call`, `api_request_error` (record-only cooldowns), `cli_delegate` tool (+ `/cli-*` commands incl. **`/cli-brain`** manual switch/probe/restart), `generate_music`. `DELEGATE_ARGV`/`CODING_PRIORITY` = worker fallback order. |
 | `dashboard/plugin_api.py` | FastAPI backend at `/api/plugins/cli-orchestrator/`. Catalog (CLIs), providers catalog, media catalog, scan/limits/usage/install, `/install/assist` (AI help via a worker CLI, runs off the event loop), `/cli/test` + `/cli/open` (live sign-in check), `/capabilities`, `/verify-mark`, `/use-cases` (per-category routing), cooldown endpoints, **brain endpoints** (`/brain`, `/brain/primary` — promote provider to primary + re-pin enabled crons via `_repin_enabled_crons`, `/gateway/restart` via launchctl kickstart), **credential pool** (`/auth/pool`, `/auth/add-key`, `/auth/add-oauth`(+status), `/auth/reset`, `/auth/remove` — wraps `hermes auth`). |
 | `dashboard/dist/index.js` | Dashboard UI (plain IIFE, no build). THREE top-level tabs: **Backends** (staged: catalog → install → verify → promote to Fleet; CLIs+models+media, caps, keys, install stepper, per-backend category toggles, live Check sign-in, get-key links, usage bars, search), **Brains** (switch primary model + restart gateway + auto-repin crons; pooled accounts add/reset/remove per brain), **Routing** (category-wise primary/fallback). |
 | `dashboard/manifest.json` | Registers the CLI Governor tab (web dashboard only). |
@@ -96,10 +96,10 @@ One-liner: **"The CLI & backend control plane for Hermes — extends Hermes's mo
 
 Priority order — these deliver the North Star (status audited 2026-07-08):
 
-1. **Auto-cooldown skip — the Sentinel (STILL THE KEY GAP).** The promote/restore engine + proactive/reactive triggers are BUILT (§5c). Missing: a **log-watcher/health-probe** that auto-*records* auth-layer quota deaths (Codex) which no plugin hook can see, and **probe-gated restore** (verify a bucket with one real call before restoring it as primary, not wall-clock alone).
+1. **Manual brain switch — BUILT 2026-07-08 (replaces the auto-heal plan).** `/cli-brain` status/switch/test/restart from any gateway platform; record-only cooldown hook; pre-turn warning. NO autonomous switching — user decision, see §5c. Remaining nice-to-have: a log-watcher that auto-*records* (never switches) auth-layer quota deaths so status is accurate without a manual `/cli-brain test`.
 2. **Free-first governed chain.** Build/rank `fallback_providers` across every addable bucket (free OAuth + free API + trials + subs as bonus), Ollama only if present. Native Hermes fallback + credential pooling does the rotation; the governor manages/ranks it. Blocked in practice by zero free keys on the machine → needs the **Pool Builder wizard** (guided Qwen OAuth + OpenRouter `:free` + Gemini API key, each live-verified, then auto-rank the chain).
 3. ~~Multi-key / multi-account pooling~~ **BUILT** — Brains tab + `/auth/*` endpoints wrap `hermes auth` (add key / add OAuth / reset / remove per provider). Pool currently holds only codex(1) + copilot(1); value realizes once free buckets are added.
-4. **Crons ride the chain — HALF BUILT.** Manual brain switch (`/brain/primary`) re-pins all ENABLED crons to the new primary (drift-guard #44585 exemption). **GAP: the auto-heal path (`_promote_primary` in `__init__.py`) does NOT re-pin crons and does NOT restart the gateway** — an auto-promotion would strand pinned crons on the dead provider and (for gateway sessions) not take effect until restart. Bring the auto path to parity with the manual path.
+4. **Crons ride the chain — BUILT.** Every switch path now re-pins all ENABLED crons to the new primary (drift-guard #44585 exemption) AND restarts the gateway: dashboard `/brain/primary` + `/gateway/restart`, and `/cli-brain <provider>` (verified round-trip 2026-07-08).
 5. `/cli-dashboard` command — one-click bridge from desktop/chat to the web UI.
 
 ---
@@ -138,37 +138,43 @@ provider to primary (swap `model.provider`/`model.default`), NOT just reorder th
 fallback chain** — because Hermes-native fallback won't rotate off a hard-quota
 primary.
 
-### Auto-heal — what's BUILT and what's the remaining gap (be precise)
-Built in `__init__.py` and verified:
-- **Engine**: `_promote_primary()` (swap in the best healthy authed provider,
-  demote the dead one to fallback, remember the preferred primary) and
-  `_maybe_restore_primary()` (restore when the cooldown clears). Primary block
-  uses `default:`; fallback entries use `model:`. Ranked candidates in
-  `_PROMOTE_CANDIDATES` (copilot → codex → gemini → openrouter → nous → ollama).
-- **Proactive trigger** (`on_session_start`): if the current primary is a
-  **recorded-cooling** provider, promote off it before the session uses it.
-  Verified: codex-primary + recorded cooldown → session start promotes copilot.
-- **Reactive trigger** (`api_request_error` hook): catches **API-layer** 429/quota
-  errors (e.g. a free API provider 429ing mid-request) → records cooldown + promotes.
+### Brain switching is MANUAL — auto-heal was REMOVED (user decision 2026-07-08)
+The user explicitly rejected autonomous switching: **the plugin must never
+rewrite `model.provider` on its own.** The auto-heal engine (`_promote_primary`
+/ `_maybe_restore_primary` / `on_session_start` trigger) was removed and
+replaced with a manual-first design, all in `__init__.py`:
 
-**THE REMAINING GAP (not built): auto-*recording* Codex's cooldown.** Codex's
-"quota exhausted (429); retry after N" is raised in **`hermes_cli/auth.py` — the
-AUTH layer, before any API request** — so **no plugin hook (incl. api_request_error)
-fires for it** (verified: a real `hermes -z` with codex primary did NOT trigger the
-hook). So the reactive path can't see Codex die. Fix = a background **health-probe**
-(a cron the plugin installs, or a log-watcher of the gateway error log) that probes
-the primary, catches the auth-layer quota in its own try/except, and **records the
-cooldown** — after which the proactive `on_session_start` guard heals automatically.
-Until that probe exists, Codex's cooldown must be recorded by other means.
+- **`/cli-brain` command family** (works from Telegram/chat; also `/cli brain …`).
+  Dispatches directly with NO LLM, so it works even when the current brain is dead:
+  - `/cli-brain` — status: primary, fallback chain, cooldowns w/ ETA, ranked
+    switchable brains (`_BRAIN_CANDIDATES`: copilot → codex → gemini →
+    openrouter → nous → ollama) with auth state.
+  - `/cli-brain <provider> [model]` — `_switch_primary()`: promote to primary,
+    demote old primary to front of fallbacks, **re-pin enabled crons** (reuses
+    backend `_repin_enabled_crons`), clear the legacy `auto_heal` state key, and
+    **restart the gateway ~5s after the reply flushes** (launchctl kickstart,
+    pkill fallback; launchd relaunches). Warns if the target has a recorded cooldown.
+  - `/cli-brain test <provider> [model]` — `_probe_provider()`: ONE real
+    one-shot call (`hermes -z … --provider X -m Y`); records a cooldown on
+    quota/rate-limit (this is how Codex's AUTH-layer death gets recorded — the
+    probe catches it in its own subprocess), clears it on success. Spends 1 request.
+  - `/cli-brain restart` — restart the gateway only.
+- **`api_request_error` hook is RECORD-ONLY** now: on 429/quota it records the
+  cooldown (accurate status + warnings), never switches.
+- **`pre_llm_call` warning**: if the current primary has a recorded cooldown, a
+  context line tells the model to suggest `/cli-brain <provider>` to the user.
 
-Also note: the auto-heal path writes `config.yaml` but does **not** restart the
-gateway (config loads at gateway start) and does **not** re-pin crons — the
-manual Brains-tab switch does both. See roadmap #4.
+Verified live 2026-07-08: status vs real config; probe copilot = real call, ✓
+healthy 56s; full switch round-trip copilot → custom/ollama → copilot (config
+rewritten with base_url, 1 enabled cron re-pinned each way, gateway restarted
+by launchd both times). **Known limitation: slash commands do NOT dispatch in
+`hermes -z` oneshot mode** (they go to the LLM) — they are gateway-platform
+commands (Telegram etc.), which is the intended surface.
 
 ## 6. Current live state (dev machine, audited 2026-07-08)
 
-- Primary = **copilot/gpt-5.4**; fallbacks = openai-codex (cooldown recorded, **~20.8d left**), custom/ollama (qwen3.5). `auto_heal.preferred_primary` = **openai-codex** — the engine will try to restore Codex as primary when its cooldown clears (probe-gate this! see roadmap #1).
+- Primary = **copilot/gpt-5.4**; fallbacks = custom/ollama (qwen3.5) → openai-codex (cooldown recorded, **~20.8d left**). The legacy `auto_heal` state key was cleared — nothing restores Codex automatically; when its cooldown ends, `/cli-brain test openai-codex` then `/cli-brain openai-codex` if wanted.
 - Authed model providers: **Codex, Copilot, Ollama** only (`auth.json` credential_pool: openai-codex×1, copilot×1). The ~10 free/trial providers still need API keys (get-key links in the UI).
 - Worker CLIs on PATH: **codex, opencode, agy, gh, copilot, ollama** (verified earlier); **gemini** present but free tier dead; **qwen** present but headless crashes (Node v24.13.1); **claude** not installed.
-- Crons in `~/.hermes/cron/jobs.json`: **"small-cap-stock-research-market-hours" is ENABLED and pinned to copilot/gpt-5.4**; "AI trending news + research briefing" disabled/unpinned. The enabled cron is why auto-heal parity (roadmap #4 gap) matters now.
+- Crons in `~/.hermes/cron/jobs.json`: **"small-cap-stock-research-market-hours" is ENABLED and pinned to copilot/gpt-5.4** (re-pins automatically on every brain switch); "AI trending news + research briefing" disabled/unpinned.
 - The user has NOT set up any free provider keys yet (`.env` has only Telegram vars) — realizing the pool requires adding a few (Qwen login + OpenRouter `:free` + Gemini API is the fastest path to effectively-unlimited consistent crons without Ollama).
