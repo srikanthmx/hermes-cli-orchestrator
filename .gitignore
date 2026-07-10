@@ -4,3 +4,6 @@ __pycache__/
 *.tmp
 *.log
 archive-*/
+
+# Local-only writeups, drafts, social posts — NEVER commit these.
+documents/
