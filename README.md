@@ -74,6 +74,56 @@ hermes dashboard
 
 Enabling activates the usage hook, the intent-routing policy, the `cli_delegate` tool, the `/cli-*` commands, and `generate_music` on next start. (The dashboard tab works even without step 3.)
 
+### Or let an agent install it — copy-paste prompt
+
+Don't want to touch a terminal? Paste this into **a Hermes chat** (Hermes runs the commands itself via its `terminal` tool), **Claude Code**, or any coding agent with shell access:
+
+```text
+Set up the Hermes CLI Orchestrator plugin (https://github.com/srikanthmx/hermes-cli-orchestrator)
+on this machine. Do each step, VERIFY it with a real command before moving to the next,
+and give me a checklist report at the end. Never modify the Hermes source tree itself.
+
+1. Preflight: run `hermes --version`. Need Hermes Agent v0.18 or newer. If `hermes` is
+   not on PATH, stop and tell me to install Hermes first:
+   https://github.com/NousResearch/hermes-agent
+
+2. Install: clone into Hermes's user-plugin directory — the folder name MUST be
+   exactly `cli-orchestrator`:
+     git clone https://github.com/srikanthmx/hermes-cli-orchestrator.git ~/.hermes/plugins/cli-orchestrator
+   If that directory already exists, update it instead:
+     git -C ~/.hermes/plugins/cli-orchestrator pull
+
+3. Enable: run `hermes plugins enable cli-orchestrator`, then confirm it shows as
+   enabled in `hermes plugins list`.
+
+4. Load it: plugin Python loads once at process start, so restart whatever Hermes
+   processes are running (gateway and/or dashboard). On macOS with the launchd
+   service: `launchctl kickstart -k gui/$UID/ai.hermes.gateway`. Otherwise restart
+   them however they were started. If nothing is running, skip — it loads on next start.
+
+5. Wire up the fleet: report which worker CLIs are already on PATH
+   (check: codex, claude, agy, opencode, qwen, copilot, cursor-agent, amp, crush,
+   goose, gh, glab, ollama) and which model providers are authed
+   (`hermes auth list` or ~/.hermes/auth.json). Summarize what my current
+   primary brain and fallback chain are (model: + fallback_providers: in
+   ~/.hermes/config.yaml) — do NOT change them.
+
+6. Tell me how to finish:
+   - open `hermes dashboard` → "CLI Governor" tab → Backends, to verify CLIs
+     (live Check sign-in) and add free provider keys via the get-key links
+     (fastest free pool: Qwen OAuth + OpenRouter :free + Gemini API key);
+   - type /cli-help and /cli-brain in my Telegram/chat gateway to confirm the
+     remote commands landed (slash commands work on gateway platforms, not in
+     `hermes -z` one-shot mode).
+
+7. Optional, only if I say yes: install the bundled free keyless image backend:
+     cp -r ~/.hermes/plugins/cli-orchestrator/backends/image_gen/pollinations ~/.hermes/plugins/image_gen/pollinations
+     hermes plugins enable pollinations
+     hermes config set image_gen.provider pollinations
+```
+
+The prompt is deliberately conservative: it verifies every step, reads your brain config without changing it, and leaves key-adding to you (keys belong in the loopback dashboard, not in chat history).
+
 ### The CLI Governor tab
 
 Right after **Skills** in the left nav. Three top-level tabs:
